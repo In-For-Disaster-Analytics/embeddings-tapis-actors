@@ -1,0 +1,46 @@
+# embeddings-tapis-actors -- Python dependencies
+#
+# Minimal, real packages for what these Actors are described as doing in the
+# design spec (docs/design/2026-07-22-geospatial-embeddings-classification.md
+# in the WebODM repo). Nothing here is aspirational -- see README "Status:
+# skeleton only" for what is not yet implemented against these.
+
+# --- Numerics / imaging -----------------------------------------------------
+# Real imports used by the Clay embedding scripts this Actor's inference code
+# is meant to follow -- see embeddings-research/scripts/clay_embed_sized.py.
+numpy
+Pillow
+PyYAML
+
+# --- Clay v1.5 encoder (embed-generate only) --------------------------------
+# torch is Clay's inference runtime (embeddings-research/scripts/
+# clay_embed_sized.py imports torch directly and loads a torch checkpoint).
+torch>=2.4.0
+
+# NOTE: the encoder itself -- the `claymodel` package imported as
+# `from claymodel.finetune.embedder.factory import EmbeddingEncoder` -- is
+# Clay Foundation's own repo (embeddings-research/clay-model-src, pyproject
+# name "claymodel"), not a package published to PyPI. It is deliberately NOT
+# pinned here: a real implementation needs to decide how that source tree
+# (and its own torchvision/einops/timm/etc. dependencies -- see
+# clay-model-src/pyproject.toml) gets vendored into this repo's runtime
+# (e.g. `pip install -e path/to/clay-model-src` in the Dockerfile once that
+# path is real). See README "Next steps" item 3.
+
+# --- Raster tiling (embed-generate: STAC-sourced visits, Decision 19/20/23) -
+# Same library WebODM's own app/api/tiler.py already depends on -- reused
+# here for tiling a STAC item's COG asset directly, rather than going through
+# WebODM's own /tiles/{z}/{x}/{y} endpoint.
+rio-tiler
+
+# --- embeddingsdb (Postgres+pgvector Pod, Decision 26) ----------------------
+psycopg2-binary
+
+# --- Experiment tracking / model registry (model-train, Decision 17) -------
+mlflow
+
+# --- Train/test split, tuning, diagnostics (model-train, Decision 16) ------
+scikit-learn
+
+# --- HTTP clients (WebODM tiler, DSO STAC API, Tapis token refresh) --------
+requests
