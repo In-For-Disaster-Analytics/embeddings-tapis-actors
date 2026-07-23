@@ -1,24 +1,42 @@
 #!/usr/bin/env python3
-"""Register (or update) embeddingsdb as a Postgres+pgvector Tapis Pod.
+"""Register (or update) embeddingsdb as a Postgres+PostGIS+pgvector Tapis Pod.
 
-Adapted from label-studio-tapis-auth/tapis/register_pod.py (same upsert/
-dry-run/recreate conventions), with two real differences from that
-precedent, not just cosmetic renames:
+SUPERSEDED BY REALITY, 2026-07-23 -- read this before trusting anything below.
+The live embeddingsdb Pod was NOT created by an earlier version of this
+script. It was created directly from Tapis's own "17postgis3.5" Pod
+TEMPLATE (Postgres 17 + PostGIS 3.5 pre-installed), then pgvector was added
+to the *running* container afterward via `tapis/install_pgvector.py`
+(`apt-get install postgresql-17-pgvector` through Tapis's real
+`exec_pod_commands` API, confirmed to have root/apt access -- not guaranteed
+by Tapis's docs, verified empirically). Schema was applied via a plain
+`psql -f schema/embeddingsdb.sql` afterward. All of that is real and already
+done -- see this repo's README "Status" section.
 
-  1. embeddingsdb is a stock public image (pgvector/pgvector:pg16) -- no
-     custom Dockerfile, no GHCR build/push step, no --owner/--image-tag GHCR
-     plumbing. Do not build or push any image for this Pod.
+This script has been rewritten to match that real path (`template=`, not a
+custom `image=`) so it stays useful if the Pod ever needs to be recreated
+from scratch -- rather than leaving the original, untested plan (a custom
+`pgvector/pgvector:pg16` image) as stale, wrong guidance in the repo. Two
+real differences from the label-studio-tapis-auth/tapis/register_pod.py
+precedent this was adapted from, not just cosmetic renames:
+
+  1. embeddingsdb uses Tapis's own Pod template ("17postgis3.5") -- no
+     custom Dockerfile, no GHCR build/push step. pgvector is NOT part of
+     that template (confirmed live: `CREATE EXTENSION vector` fails with
+     "could not open extension control file" until installed) -- run
+     `tapis/install_pgvector.py` once after this script creates/updates
+     the Pod.
   2. embeddingsdb is a database, not an HTTP service with a login flow --
      there is no OAuth client to register (that concern is specific to
      Label Studio's Tapis SSO use case and does not apply here; it has been
      removed entirely, not just made optional). Networking uses Tapis's
-     "postgres" protocol/port block, not "default"/"http".
+     "postgres" protocol/port block, not "default"/"http" -- though see
+     pod_hostname()'s docstring for a real, unexplained discrepancy between
+     that and the actual live Pod's hostname.
 
-This script creates the POD ONLY -- it does NOT apply the schema. See
-schema/embeddingsdb.sql and this repo's README "Next steps" for why
-applying the schema is a deliberately separate step.
-
-    embeddingsdb  ->  embeddingsdb-postgres.pods.<domain>  (postgres wire protocol)
+This script creates/updates the POD ONLY -- it does NOT install pgvector or
+apply the schema. See tapis/install_pgvector.py, schema/embeddingsdb.sql,
+and this repo's README "How a future implementer should proceed" for the
+full real sequence.
 
 Usage:
     export TAPIS_USERNAME=... TAPIS_PASSWORD=...      # or you'll be prompted
@@ -28,17 +46,16 @@ Usage:
     python tapis/register_pod.py --print-connection-string  # just print EMBEDDINGSDB_URL, no Tapis call
 
 Prerequisites:
-    * None beyond a Tapis account with Pods access -- pgvector/pgvector:pg16
-      is public on Docker Hub; Tapis Pods pulls it anonymously, same as any
-      other public image.
+    * A Tapis account with Pods access. No image to build/push -- the
+      template provides Postgres+PostGIS; pgvector is added post-creation.
 
-NOT YET LIVE-TESTED: this mirrors label-studio-tapis-auth's proven pod
-upsert pattern (already running in production for that Pod), adapted for
-Postgres networking per Tapis's own Pods docs, but this exact script has not
-been run against a real Tapis tenant -- no credentials are available in the
-environment this script was written in. Recommend --dry-run first, then a
-real run, then confirming a real `psql` connection before applying
-schema/embeddingsdb.sql or pointing any Actor at EMBEDDINGSDB_URL.
+CAUTION: this rewritten version has NOT itself been run against Tapis --
+only the manually-created Pod (via the Tapis console, not this script) and
+tapis/install_pgvector.py have been live-verified. If you use this script
+to recreate the Pod, confirm the resulting spec (--dry-run first) actually
+matches a "17postgis3.5"-template Pod before trusting it, and re-run
+install_pgvector.py + the schema afterward -- a freshly (re)created Pod
+starts with neither.
 """
 
 from __future__ import annotations
@@ -60,12 +77,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 POD_ID = "embeddingsdb"
 VOLUME_ID = "embeddingsdbdata"
 
-# The stock, public Postgres 16 + pgvector image -- no custom Dockerfile, no
-# GHCR build. Pinned to the pg16 tag (not a more specific patch tag like
-# 0.8.5-pg16-trixie) so this Pod tracks pgvector's own pg16 patch releases
-# automatically; re-pin to an exact patch tag later if reproducibility across
-# restarts becomes a real concern (it isn't yet -- this Pod doesn't exist).
-DEFAULT_IMAGE = "pgvector/pgvector:pg16"
+# Tapis's own built-in Pod template -- Postgres 17 + PostGIS 3.5 -- confirmed
+# real by the live Pod (created via the Tapis console, matched here). pgvector
+# is NOT part of this template; see tapis/install_pgvector.py, run once after
+# this script creates/updates the Pod.
+DEFAULT_TEMPLATE = "17postgis3.5"
 
 DEFAULT_POSTGRES_DB = "embeddingsdb"
 DEFAULT_POSTGRES_USER = "embeddingsdb"
@@ -96,15 +112,22 @@ def _pods_domain(base_url: str) -> str:
 
 
 def pod_hostname(base_url: str) -> str:
-    """External hostname for the "postgres" networking interface.
+    """External hostname for embeddingsdb.
 
-    Using a non-"default" networking key ("postgres", not "default")
-    allocates a SEPARATE subdomain interface per Tapis's own Pods docs --
-    hence the "-postgres" suffix on the hostname, distinct from how
-    label-studio-tapis-auth's pod_url() builds a plain "{pod_id}.pods.{domain}"
-    for its single "default" HTTP interface.
+    CORRECTED against the real, live Pod, 2026-07-23 -- an earlier version of
+    this function predicted a "-postgres" suffix (reasoning: a non-"default"
+    networking key allocates a separate subdomain interface, per Tapis's own
+    Pods docs). The actual live Pod's hostname has NO such suffix
+    ("embeddingsdb.pods.portals.tapis.io", confirmed via a real `psql`
+    connection) -- a bare "{pod_id}.pods.{domain}", same shape as
+    label-studio-tapis-auth's single "default" HTTP interface. Why a
+    template-created Pod's postgres-protocol interface doesn't get the
+    suffix generic Tapis docs implied is not resolved here -- this function
+    now matches OBSERVED reality rather than docs-derived prediction, but
+    that gap in understanding is worth resolving if it ever matters (e.g.
+    a second networking interface on the same Pod).
     """
-    return f"{POD_ID}-postgres.pods.{_pods_domain(base_url)}"
+    return f"{POD_ID}.pods.{_pods_domain(base_url)}"
 
 
 def connection_string(base_url: str, user: str, password: str, db: str) -> str:
@@ -146,7 +169,7 @@ def _ensure_postgres_password(env_path: Path) -> str:
     return generated
 
 
-def build_spec(image: str, base_url: str, *, postgres_db: str, postgres_user: str,
+def build_spec(template: str, base_url: str, *, postgres_db: str, postgres_user: str,
                postgres_password: str) -> dict:
     env = {
         "POSTGRES_DB": postgres_db,
@@ -156,9 +179,11 @@ def build_spec(image: str, base_url: str, *, postgres_db: str, postgres_user: st
 
     return {
         "pod_id": POD_ID,
-        "image": image,
-        "description": "embeddingsdb -- Postgres+pgvector store for the geospatial "
-                        "embeddings/classification system (Decision 26)",
+        "template": template,
+        "description": "embeddingsdb -- Postgres+PostGIS+pgvector store for the "
+                        "geospatial embeddings/classification system (Decision 26). "
+                        "pgvector added post-creation via install_pgvector.py -- "
+                        "not part of the template itself.",
         # "postgres" (not "default"/"http") -- a non-HTTP service on its own
         # subdomain interface, per Tapis's own Pods networking docs. Port
         # 5432 here is the INTERNAL container port Postgres listens on;
@@ -233,8 +258,9 @@ def upsert_pod(t, spec: dict, *, recreate: bool, start: bool, restart: bool) -> 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Register embeddingsdb as a Tapis Pod (Postgres+pgvector).")
     parser.add_argument("--base-url", default=os.environ.get("TAPIS_BASE_URL", "https://portals.tapis.io"))
-    parser.add_argument("--image", default=DEFAULT_IMAGE,
-                        help="Public pgvector/pgvector image tag -- no custom build/push.")
+    parser.add_argument("--template", default=DEFAULT_TEMPLATE,
+                        help="Tapis Pod template (Postgres+PostGIS). pgvector is added "
+                             "separately -- see tapis/install_pgvector.py.")
     parser.add_argument("--postgres-db", default=os.environ.get("POSTGRES_DB", DEFAULT_POSTGRES_DB))
     parser.add_argument("--postgres-user", default=os.environ.get("POSTGRES_USER", DEFAULT_POSTGRES_USER))
     parser.add_argument("--volume-size-mb", type=int, default=DEFAULT_VOLUME_SIZE_MB)
@@ -262,7 +288,7 @@ def main(argv=None) -> int:
         # No password generation/mutation in --dry-run -- print the spec
         # shape without touching .env or requiring a real secret yet.
         placeholder_password = os.environ.get("POSTGRES_PASSWORD", "<generated-if-unset>")
-        spec = build_spec(args.image, args.base_url,
+        spec = build_spec(args.template, args.base_url,
                            postgres_db=args.postgres_db,
                            postgres_user=args.postgres_user,
                            postgres_password=placeholder_password)
@@ -290,7 +316,7 @@ def main(argv=None) -> int:
 
     ensure_volume(t, size_limit_mb=args.volume_size_mb, dry_run=False)
 
-    spec = build_spec(args.image, args.base_url,
+    spec = build_spec(args.template, args.base_url,
                        postgres_db=args.postgres_db,
                        postgres_user=args.postgres_user,
                        postgres_password=postgres_password)

@@ -6,18 +6,25 @@ Tapis Actors for the Geospatial Embeddings & Classification System: `embed-gener
 Actor code only — the WebODM-side plugin that calls these Actors lives in
 `coreplugins/embeddings/` in the `WebODM` repo.
 
-## Status: skeleton only
+## Status: embeddingsdb is live; Actors are still skeleton-only
 
-**Neither Actor runs real logic yet.** This increment mirrors how
-`WebODM/coreplugins/embeddings/` (the sibling plugin these Actors serve) was scaffolded:
-real module/function structure with docstrings describing exactly what each piece will
-do, `NotImplementedError` bodies, no fabricated business logic. The blocking reason is
-the same for both: the infrastructure these Actors depend on does not exist yet —
+**Neither Actor runs real logic yet**, but `embeddingsdb` itself is real and running:
 
-- `embeddingsdb` — the Postgres+pgvector Tapis Pod (Decision 26). **Not stood up yet**,
-  but this increment adds `tapis/register_pod.py` (Pod registration script) and
-  `schema/embeddingsdb.sql` (the real DDL) — see "Next steps" item 1 for the two-step
-  process to actually stand it up. Neither has been run against a live Tapis tenant.
+- `embeddingsdb` — **live**, as of 2026-07-23. Postgres 17.5 + PostGIS 3.5.2 + pgvector
+  0.8.5, full schema applied (all 13 tables from `schema/embeddingsdb.sql`), verified
+  directly via `psql` (extensions active, a real vector distance query, all expected
+  tables present).
+
+  **How it was actually provisioned — different from this repo's original plan, and
+  worth understanding before touching `tapis/register_pod.py`:** created directly from
+  Tapis's own **`17postgis3.5` Pod template** (Postgres 17 + PostGIS 3.5 pre-installed),
+  not the custom `pgvector/pgvector:pg16` image `register_pod.py` originally assumed.
+  pgvector was then added to the *live* Pod via `tapis/install_pgvector.py`, which runs
+  `apt-get install postgresql-17-pgvector` inside the running container through Tapis's
+  real `exec_pod_commands` API (confirmed to have root/apt access — not guaranteed by
+  Tapis's docs, verified empirically), followed by a plain `CREATE EXTENSION vector`
+  over `psql`. `register_pod.py` has been updated to match this real path (`template=`,
+  not a custom `image=`) — see its own module docstring for the full history.
 - `mlflow` — the MLflow Tracking Server Tapis Pod (Decision 17). Not stood up.
 - A Clay v1.5 checkpoint deployed anywhere these Actors can read it. (A checkpoint
   exists at `embeddings-research/models/clay-v1.5.ckpt` in this monorepo-of-repos, used
@@ -99,27 +106,16 @@ Tuning, and Diagnostics**, and **Experiment Tracking and Model Registry: MLflow*
 
 Roughly in dependency order, since each of these unblocks the next:
 
-1. Stand up the `embeddingsdb` Postgres+pgvector Pod and apply its schema. This is two
-   separate steps, not one, because the Pod runs a stock public image
-   (`pgvector/pgvector:pg16`) with no custom build, and there is no verified mechanism
-   to inject an init script into that image without a custom build (which this
-   increment deliberately avoids — see Decision 22's "no working Actor logic yet"
-   framing, same reasoning applied here to the Pod):
-   1. `python tapis/register_pod.py` — creates (or updates) the `embeddingsdb` Pod
-      and its persistent Volume (`/var/lib/postgresql/data`). Does **not** apply any
-      schema — the pod boots with an empty `embeddingsdb` database. Run
-      `--dry-run` first to review the spec; see the script's own docstring for
-      prerequisites and the real, not-yet-live-tested caveat.
-   2. `psql "$EMBEDDINGSDB_URL" -f schema/embeddingsdb.sql` — applies the real DDL for
-      every table in the design spec's **Embeddings DB Schema** section (`sites`,
-      `tile_grid`, `visits`, `tile_observations`, `encoders`, `embeddings`,
-      `covariates`, `label_classes`, `labels`, `model_algorithms`, `models`,
-      `model_inputs`, `predictions`), once the Pod is reachable. Read
-      `schema/embeddingsdb.sql`'s own header comment for the id-type/extension
-      choices made there (`uuid` PKs, `pgvector`, `postgis`) and a flagged, real
-      schema tension around `embeddings.vector`'s fixed dimension vs. `encoders`'
-      multi-config registry (Decision 3) — not silently resolved, see that file's
-      comment on the `embeddings` table.
+1. ~~Stand up the `embeddingsdb` Postgres+pgvector Pod and apply its schema.~~ **Done**
+   (2026-07-23). Real path taken (see "Status" above for the full story): created from
+   Tapis's `17postgis3.5` template, pgvector added live via
+   `python tapis/install_pgvector.py --pod-id embeddingsdb`, schema applied via
+   `psql "$EMBEDDINGSDB_URL" -f schema/embeddingsdb.sql`. All 13 tables + 11 indexes
+   confirmed present. `schema/embeddingsdb.sql`'s own header comment still documents
+   the id-type/extension choices made there (`uuid` PKs, `pgvector`, `postgis`) and a
+   flagged, real, still-unresolved schema tension around `embeddings.vector`'s fixed
+   dimension vs. `encoders`' multi-config registry (Decision 3) — worth resolving
+   before a second encoder size/config is ever actually run against this database.
 2. Stand up the `mlflow` Pod (backend store can share the `embeddingsdb` Postgres
    instance per the design spec; artifact store on a persistent Tapis Volume).
 3. Decide where the Clay v1.5 checkpoint and the `claymodel` encoder package
