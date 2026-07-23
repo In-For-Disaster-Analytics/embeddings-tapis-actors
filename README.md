@@ -28,19 +28,21 @@ Actor code only — the WebODM-side plugin that calls these Actors lives in
 - `tapis/register_actor.py` (new) registers both Actors, mirroring
   `register_pod.py`'s `--dry-run`/`.env` conventions, adapted for the real
   Actors API (`create_actor`, not `create_pod`). `--dry-run` was actually run and
-  confirmed working. The non-dry-run path (and the `docker push` to Docker Hub
-  it depends on) was **not** run — no Docker Hub or Tapis credentials exist in
-  this environment.
+  confirmed working. **Corrected, see Decision 36**: images are pushed to GHCR
+  (`ghcr.io/in-for-disaster-analytics/embeddings-tapis-actors`), not Docker Hub
+  as Decision 35 originally stated — a new `.github/workflows/docker-build.yml`
+  (mirroring `label-studio-tapis-auth`'s own) builds+pushes both images on push
+  to `main`. Neither the push nor the real registration call has been run yet.
 - **Still stubs, unchanged in scope:** `embed_generate`'s tile enumeration, pixel
   fetching, Clay v1.5 inference (`run()` still raises `NotImplementedError`
   before reaching the now-real write functions); all of `model_train` beyond its
   message-contract fix (its own embeddingsdb/MLflow un-stubbing is later work).
 
-See design spec Decision 35 for the full account, including the real facts this
-increment is grounded in (confirmed against Tapis's own Actors docs) and every
-judgment call flagged along the way (Docker Hub image-name placeholder,
-`find_existing_actor_id()`'s assumption about the Actors API's list/lookup
-shape, and Decision 30's credential question, still unresolved).
+See design spec Decisions 35-36 for the full account, including the real facts
+this increment is grounded in, the Docker-Hub-to-GHCR correction, and every
+judgment call flagged along the way (`find_existing_actor_id()`'s assumption
+about the Actors API's list/lookup shape, and Decision 30's credential
+question, still unresolved).
 
 `embeddingsdb` itself is real and running, per Decision 33:
 
@@ -193,16 +195,17 @@ Roughly in dependency order, since each of these unblocks the next:
    explicitly out of scope for the Decision 35 increment, which only fixed
    `model_train`'s message contract.
 8. ~~Write a Tapis Actor registration script for both Actors.~~ **Done**
-   (2026-07-23, Decision 35): `tapis/register_actor.py`, mirroring
+   (2026-07-23, Decisions 35-36): `tapis/register_actor.py`, mirroring
    `register_pod.py`'s `--dry-run`/upsert conventions, adapted for the real
-   Actors API (`create_actor`/`send_message`, confirmed against Tapis's own
-   docs — not `create_pod`/`get_pod`). **Not done**: the actual `docker push` to
-   public Docker Hub (Abaco's real image-source requirement, also confirmed this
-   increment — see the Dockerfile's own note) and the script's non-dry-run
-   registration call itself — no Docker Hub or Tapis credentials exist in this
-   environment. Once both Actors are registered for real, update
-   `WO_EMBEDDINGS_ACTOR_ID`/`WO_MODEL_ACTOR_ID` in WebODM's settings with the
-   real `actor_id`s the script prints.
+   Actors API (`create_actor`/`send_message` — not `create_pod`/`get_pod`).
+   Images are pushed to GHCR via `.github/workflows/docker-build.yml` (Decision
+   36 corrected an earlier, wrong Docker-Hub-only assumption — GHCR works fine,
+   same as the Pods precedent). **Not done yet**: pushing to `main` to actually
+   trigger the workflow, setting the resulting GHCR package public (command in
+   the workflow's own comments), and the script's non-dry-run registration call
+   itself — no Tapis credentials exist in this environment. Once both Actors
+   are registered for real, update `WO_EMBEDDINGS_ACTOR_ID`/`WO_MODEL_ACTOR_ID`
+   in WebODM's settings with the real `actor_id`s the script prints.
 9. Wire `coreplugins/embeddings/embeddings_client.py`'s `queue_embed_generate()`/
    `queue_model_train()` (in the `WebODM` repo — real client module exists per
    Decision 34, but these two functions are still deliberate

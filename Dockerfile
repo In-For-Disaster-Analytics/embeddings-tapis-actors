@@ -8,18 +8,17 @@
 # and .env.example for why those are deliberately not baked in here).
 #
 # NOTE on Tapis Actor image conventions -- RESOLVED, see design spec
-# Decision 35: unlike this repo's sibling label-studio-tapis-auth (a Tapis
-# POD, registered via tapis/register_pod.py, confirmed to work from a public
-# GHCR image), Tapis ACTORS are a different Tapis subsystem (Abaco) with
-# their own registration API, and Abaco does NOT pull from GHCR -- confirmed
-# verbatim against Tapis's own Actors docs: "Abaco pulls images for its
-# actors from the public Docker Hub." This image must therefore be pushed to
-# public Docker Hub (not GHCR) before tapis/register_actor.py's
-# create_actor() call can succeed -- neither the `docker push` nor the
-# registration call itself has been run for real this increment (no Docker
-# Hub credentials, no Tapis credentials in this environment); see
-# tapis/register_actor.py and this repo's README "How a future implementer
-# should proceed" for what's still needed.
+# Decision 35/36: Tapis's own readthedocs page states verbatim "Abaco pulls
+# images for its actors from the public Docker Hub" -- but that page has
+# been wrong/incomplete elsewhere this project too (e.g. it didn't know
+# about the real `17postgis3.5` Pod template or the real Pod hostname
+# behavior, both confirmed by direct experimentation). The project owner,
+# with real Tapis account experience, confirmed GHCR works for Actors the
+# same way it already does for this repo's sibling label-studio-tapis-auth
+# Pod. Images are built/pushed via .github/workflows/docker-build.yml (added
+# this increment, mirroring that repo's own workflow) to
+# ghcr.io/in-for-disaster-analytics/embeddings-tapis-actors, tagged
+# embed-generate-latest/model-train-latest. See tapis/register_actor.py.
 
 FROM python:3.11-slim
 

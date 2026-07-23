@@ -5,15 +5,23 @@ Mirrors this repo's own `tapis/register_pod.py` (argparse, `--dry-run`,
 `.env` loading, upsert-via-get/create) and `modflow-suite/subside/tapis/
 register_pods.py`'s multi-service-in-one-script shape, adapted for Tapis's
 ACTORS API (Abaco) -- a genuinely different subsystem from Pods, not just a
-renamed copy. Real facts this script is grounded in (confirmed against
-Tapis's own Actors docs this increment, not re-derived):
+renamed copy. Real facts this script is grounded in:
 
     1. Registration: `t.actors.create_actor(image=..., name=..., description=...,
        default_environment={...}, stateless=True, hints=[...])` via tapipy.
-    2. Image MUST be on public Docker Hub -- confirmed verbatim from Tapis's
-       docs: "Abaco pulls images for its actors from the public Docker Hub."
-       This is DIFFERENT from this repo's sibling label-studio-tapis-auth
-       Pod precedent (GHCR) -- do not assume GHCR works for Actors.
+    2. **CORRECTED, 2026-07-23**: an earlier version of this script required
+       a public Docker Hub image, citing Tapis's own readthedocs page
+       verbatim ("Abaco pulls images for its actors from the public Docker
+       Hub"). Directly corrected by the project owner, who has real,
+       hands-on Tapis account experience this session's doc fetches don't
+       have (the same readthedocs page was ALSO wrong or incomplete
+       elsewhere this session -- e.g. it didn't know about the `17postgis3.5`
+       Pod template or the real Pod hostname behavior confirmed in Decision
+       33). GHCR works for Actors the same way it already does for Pods
+       (`label-studio-tapis-auth`) -- images are built/pushed via
+       `.github/workflows/docker-build.yml` (added this increment, mirroring
+       that repo's own workflow), not a manual Docker Hub push. Do not
+       resurrect the Docker Hub requirement without a real, current source.
     3. Execution: `t.actors.send_message(actor_id=..., request_body={'message':
        <json-string-or-dict>})` queues one execution -- NOT implemented by
        this script (invocation is WebODM's `embeddings_client.py`'s job, see
@@ -32,18 +40,20 @@ confirmed above.
 
 Usage:
     export TAPIS_USERNAME=... TAPIS_PASSWORD=...      # or you'll be prompted
-    python tapis/register_actor.py --dockerhub-org <your-dockerhub-org> --dry-run
-    python tapis/register_actor.py --dockerhub-org <your-dockerhub-org>
-    python tapis/register_actor.py --dockerhub-org <your-dockerhub-org> --actors embed-generate
-    python tapis/register_actor.py --dockerhub-org <your-dockerhub-org> --recreate
+    python tapis/register_actor.py --dry-run
+    python tapis/register_actor.py
+    python tapis/register_actor.py --actors embed-generate
+    python tapis/register_actor.py --recreate
 
 Prerequisites:
-    * `docker build`+`docker push` of both images to public Docker Hub under
-      `--dockerhub-org` FIRST -- this script does not build or push images
-      (out of scope, see this repo's README "Do NOT" list for this
-      increment). There is no established Docker Hub org for this project
-      yet (unlike GHCR's `in-for-disaster-analytics`) -- `--dockerhub-org`
-      is REQUIRED with no default, deliberately, rather than inventing one.
+    * Push to `main` (or run the workflow manually) so
+      `.github/workflows/docker-build.yml` builds + pushes both images to
+      GHCR first -- this script does not build or push images itself. Images
+      land at `ghcr.io/in-for-disaster-analytics/embeddings-tapis-actors`,
+      tagged `embed-generate-latest`/`model-train-latest` (see the workflow's
+      matrix). The GHCR package must be set PUBLIC after the first push
+      (Abaco pulls anonymously, same requirement as the Pods precedent) --
+      `gh api` command for this is in the workflow's own comments.
 
 NOT resolved by this script, stated plainly rather than glossed over
 (Decision 30): `default_environment` below is static configuration baked in
@@ -105,7 +115,7 @@ ACTORS = {
         # documentation -- the code doesn't call os.environ.get() for them
         # yet, so they are deliberately NOT listed here).
         "env_keys": ["EMBEDDINGSDB_URL"],
-        "dockerhub_repo": "embed-generate",
+        "image_tag_suffix": "embed-generate",
     },
     "model-train": {
         "description": (
@@ -122,9 +132,11 @@ ACTORS = {
         # populate it once model_train gets its own DB/MLflow client
         # module(s) that actually consume those variables.
         "env_keys": [],
-        "dockerhub_repo": "model-train",
+        "image_tag_suffix": "model-train",
     },
 }
+
+DEFAULT_GHCR_IMAGE = "ghcr.io/in-for-disaster-analytics/embeddings-tapis-actors"
 
 # Env vars that may contain secrets (connection strings with embedded
 # passwords, etc.) -- masked in --dry-run output, same convention as
@@ -132,9 +144,10 @@ ACTORS = {
 SECRET_KEYS = {"EMBEDDINGSDB_URL"}
 
 
-def build_actor_spec(name: str, dockerhub_org: str, image_tag: str) -> dict:
+def build_actor_spec(name: str, ghcr_image: str, image_tag_suffix_override: str | None = None) -> dict:
     cfg = ACTORS[name]
-    image = f"{dockerhub_org}/{cfg['dockerhub_repo']}:{image_tag}"
+    tag = image_tag_suffix_override or f"{cfg['image_tag_suffix']}-latest"
+    image = f"{ghcr_image}:{tag}"
     default_environment = {k: os.environ[k] for k in cfg["env_keys"] if os.environ.get(k)}
     return {
         "image": image,
@@ -216,14 +229,14 @@ def main(argv=None) -> int:
         description="Register embed-generate and model-train as Tapis Actors.")
     parser.add_argument("--base-url", default=os.environ.get("TAPIS_BASE_URL", "https://portals.tapis.io"))
     parser.add_argument(
-        "--dockerhub-org", required=True,
-        help="Docker Hub org/username to build image references as "
-             "<org>/embed-generate:<tag> and <org>/model-train:<tag>. "
-             "REQUIRED, no default -- there is no established Docker Hub "
-             "org for this project yet (unlike GHCR's "
-             "in-for-disaster-analytics), so this is deliberately not "
-             "invented here.")
-    parser.add_argument("--image-tag", default="latest")
+        "--ghcr-image", default=DEFAULT_GHCR_IMAGE,
+        help="GHCR image (no tag) that .github/workflows/docker-build.yml "
+             f"pushes to. Default: {DEFAULT_GHCR_IMAGE}, matching this "
+             "project's established GHCR org (in-for-disaster-analytics, "
+             "same as label-studio-tapis-auth's Pod image).")
+    parser.add_argument("--image-tag-suffix",
+                        help="Override the full tag suffix (default: "
+                             "'<actor>-latest', matching the workflow's own tags).")
     parser.add_argument("--actors", choices=("both", "embed-generate", "model-train"), default="both")
     parser.add_argument("--recreate", action="store_true",
                         help="Delete + recreate instead of update. NOTE: since actor_id is "
@@ -238,7 +251,7 @@ def main(argv=None) -> int:
 
     if args.dry_run:
         for name in selected:
-            spec = build_actor_spec(name, args.dockerhub_org, args.image_tag)
+            spec = build_actor_spec(name, args.ghcr_image, args.image_tag_suffix)
             masked = dict(spec)
             masked["default_environment"] = {
                 k: ("***" if k in SECRET_KEYS else v)
@@ -256,13 +269,10 @@ def main(argv=None) -> int:
             "(stored service token vs. some other mechanism)."
         )
         print(
-            "\nNOTE: images above must already be pushed to PUBLIC Docker "
-            "Hub before real registration can succeed -- confirmed against "
-            "Tapis's own Actors docs: \"Abaco pulls images for its actors "
-            "from the public Docker Hub.\" This script does not build or "
-            "push images (`docker push` is out of scope here), and this is "
-            "different from this repo's Pods precedent "
-            "(label-studio-tapis-auth, which uses GHCR)."
+            "\nNOTE: images above must already be pushed to GHCR and set "
+            "PUBLIC before real registration can succeed -- push to main (or "
+            "run .github/workflows/docker-build.yml manually) first. This "
+            "script does not build or push images itself."
         )
         return 0
 
@@ -277,7 +287,7 @@ def main(argv=None) -> int:
     t.get_tokens()
 
     for name in selected:
-        spec = build_actor_spec(name, args.dockerhub_org, args.image_tag)
+        spec = build_actor_spec(name, args.ghcr_image, args.image_tag_suffix)
         upsert_actor(t, spec, recreate=args.recreate)
 
     return 0
