@@ -14,13 +14,17 @@ real module/function structure with docstrings describing exactly what each piec
 do, `NotImplementedError` bodies, no fabricated business logic. The blocking reason is
 the same for both: the infrastructure these Actors depend on does not exist yet —
 
-- `embeddingsdb` — the Postgres+pgvector Tapis Pod (Decision 26). Not stood up.
+- `embeddingsdb` — the Postgres+pgvector Tapis Pod (Decision 26). **Not stood up yet**,
+  but this increment adds `tapis/register_pod.py` (Pod registration script) and
+  `schema/embeddingsdb.sql` (the real DDL) — see "Next steps" item 1 for the two-step
+  process to actually stand it up. Neither has been run against a live Tapis tenant.
 - `mlflow` — the MLflow Tracking Server Tapis Pod (Decision 17). Not stood up.
 - A Clay v1.5 checkpoint deployed anywhere these Actors can read it. (A checkpoint
   exists at `embeddings-research/models/clay-v1.5.ckpt` in this monorepo-of-repos, used
   for Phase 1 research — it has not been wired into a production path from here.)
-- The Actors themselves are not registered with Tapis (no `register_pod.py`/actor
-  registration script yet — see "Next steps" below).
+- The Actors themselves (`embed-generate`/`model-train`) are not registered with Tapis
+  — Actor registration is a different Tapis subsystem from `embeddingsdb`'s Pod
+  registration (see "What is NOT in this increment" below) and is not designed here.
 
 ## Design spec
 
@@ -86,19 +90,36 @@ Tuning, and Diagnostics**, and **Experiment Tracking and Model Registry: MLflow*
   instantiation.
 - No real STAC API or WebODM-tiler HTTP calls.
 - No Tapis Actor registration script (the `embed-generate`/`model-train` equivalent of
-  `label-studio-tapis-auth/tapis/register_pod.py` — note that script registers a Tapis
-  **Pod**, not an **Actor**; Actor registration is a different Tapis API and is not
-  designed here).
+  this repo's own `tapis/register_pod.py`, added this increment — but that script
+  registers a Tapis **Pod**, not an **Actor**; Actor registration is a different Tapis
+  API and is not designed here).
 - No tests yet — there is no real behavior to test.
 
 ## How a future implementer should proceed
 
 Roughly in dependency order, since each of these unblocks the next:
 
-1. Stand up the `embeddingsdb` Postgres+pgvector Pod and apply the schema described in
-   the design spec's **Embeddings DB Schema** section (`sites`, `tile_grid`, `visits`,
-   `tile_observations`, `encoders`, `embeddings`, `covariates`, `label_classes`,
-   `labels`, `model_algorithms`, `models`, `model_inputs`, `predictions`).
+1. Stand up the `embeddingsdb` Postgres+pgvector Pod and apply its schema. This is two
+   separate steps, not one, because the Pod runs a stock public image
+   (`pgvector/pgvector:pg16`) with no custom build, and there is no verified mechanism
+   to inject an init script into that image without a custom build (which this
+   increment deliberately avoids — see Decision 22's "no working Actor logic yet"
+   framing, same reasoning applied here to the Pod):
+   1. `python tapis/register_pod.py` — creates (or updates) the `embeddingsdb` Pod
+      and its persistent Volume (`/var/lib/postgresql/data`). Does **not** apply any
+      schema — the pod boots with an empty `embeddingsdb` database. Run
+      `--dry-run` first to review the spec; see the script's own docstring for
+      prerequisites and the real, not-yet-live-tested caveat.
+   2. `psql "$EMBEDDINGSDB_URL" -f schema/embeddingsdb.sql` — applies the real DDL for
+      every table in the design spec's **Embeddings DB Schema** section (`sites`,
+      `tile_grid`, `visits`, `tile_observations`, `encoders`, `embeddings`,
+      `covariates`, `label_classes`, `labels`, `model_algorithms`, `models`,
+      `model_inputs`, `predictions`), once the Pod is reachable. Read
+      `schema/embeddingsdb.sql`'s own header comment for the id-type/extension
+      choices made there (`uuid` PKs, `pgvector`, `postgis`) and a flagged, real
+      schema tension around `embeddings.vector`'s fixed dimension vs. `encoders`'
+      multi-config registry (Decision 3) — not silently resolved, see that file's
+      comment on the `embeddings` table.
 2. Stand up the `mlflow` Pod (backend store can share the `embeddingsdb` Postgres
    instance per the design spec; artifact store on a persistent Tapis Volume).
 3. Decide where the Clay v1.5 checkpoint and the `claymodel` encoder package
