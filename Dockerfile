@@ -7,15 +7,19 @@
 # (no GPU base image, no vendored claymodel/checkpoint -- see requirements.txt
 # and .env.example for why those are deliberately not baked in here).
 #
-# NOTE on Tapis Actor image conventions: unlike this repo's sibling
-# label-studio-tapis-auth (a Tapis POD, registered via tapis/register_pod.py,
-# confirmed to work from a public GHCR image), Tapis ACTORS are a different
-# Tapis subsystem (Abaco) with their own registration API. Whether Abaco
-# accepts a GHCR image the same way Pods do has NOT been verified for this
-# repo -- do not assume it does. No registration script exists in this repo
-# yet (see README "Next steps" item 6); confirm the actual image-source
-# requirement against Tapis's Actor docs before registering these Actors for
-# real, rather than assuming the Pods precedent carries over unchanged.
+# NOTE on Tapis Actor image conventions -- RESOLVED, see design spec
+# Decision 35: unlike this repo's sibling label-studio-tapis-auth (a Tapis
+# POD, registered via tapis/register_pod.py, confirmed to work from a public
+# GHCR image), Tapis ACTORS are a different Tapis subsystem (Abaco) with
+# their own registration API, and Abaco does NOT pull from GHCR -- confirmed
+# verbatim against Tapis's own Actors docs: "Abaco pulls images for its
+# actors from the public Docker Hub." This image must therefore be pushed to
+# public Docker Hub (not GHCR) before tapis/register_actor.py's
+# create_actor() call can succeed -- neither the `docker push` nor the
+# registration call itself has been run for real this increment (no Docker
+# Hub credentials, no Tapis credentials in this environment); see
+# tapis/register_actor.py and this repo's README "How a future implementer
+# should proceed" for what's still needed.
 
 FROM python:3.11-slim
 

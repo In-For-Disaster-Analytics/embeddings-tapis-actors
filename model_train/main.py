@@ -1,14 +1,32 @@
 """
 model-train Tapis Actor -- entrypoint.
 
-SKELETON ONLY. Every function below has a docstring describing what it will
-do once the supporting infrastructure (embeddingsdb Pod, mlflow Pod, Tapis
-Actor registration) exists, and a `NotImplementedError` body -- no
-fabricated logic. See design spec:
+STILL SKELETON, except for the Abaco message contract (`read_actor_message()`
+below), which is now real -- see design spec Decision 35. Every other
+function still has a docstring describing what it will do once the
+supporting infrastructure (embeddingsdb DB client, mlflow Pod/client, a
+deployed encoder to train against) exists, and a `NotImplementedError` body
+-- no fabricated logic. This Actor's embeddingsdb writes are explicitly NOT
+un-stubbed this increment (unlike embed-generate's) -- that is a separate,
+later increment. See design spec:
 WebODM/docs/design/2026-07-22-geospatial-embeddings-classification.md
-(in the odm-suite monorepo-of-repos), Decisions 16, 17, 25, 28, and the
+(in the odm-suite monorepo-of-repos), Decisions 16, 17, 25, 28, 35, and the
 "Train/Test Split, Tuning, and Diagnostics" / "Experiment Tracking and Model
 Registry: MLflow" sections.
+
+Real Abaco message contract (confirmed against Tapis's own Actors docs, not
+re-derived here): Abaco injects the invocation payload as the `MSG`
+environment variable -- a JSON string -- and injects context values
+(`_abaco_execution_id`, `_abaco_username`, etc.) as their own env vars.
+`read_actor_message()` below reads `os.environ['MSG']` directly and
+`json.loads()`s it -- the simplest, most portable mechanism, preferred over
+adding a dependency on tapipy's actor-side helpers (`tapipy.actors`) for
+this. Structured-result note, not used here: a real Actor can also return
+results via a Unix socket contract (`/_abaco_results.sock`, tapipy's
+`send_bytes_result()`/`send_python_result()`, retrievable through Tapis's
+own `/results` endpoint) -- this system's real state lives in embeddingsdb,
+not Abaco's results queue, so that mechanism is documented here for
+completeness but genuinely not used.
 
 What this Actor is meant to do, end to end, once implemented
 --------------------------------------------------------------
@@ -57,22 +75,24 @@ span any combination of WebODM tasks/projects (Decision 6/8):
 
 Explicitly NOT implemented in this increment
 ---------------------------------------------
-- No embeddingsdb connection (the Pod doesn't exist yet).
-- No MLflow connection (the Pod doesn't exist yet).
+- No embeddingsdb connection (this Actor's own DB client module does not
+  exist yet -- unlike embed-generate's, which got a real one this
+  increment; see design spec Decision 35 for why the two Actors' scope
+  diverged this pass).
+- No MLflow connection (the Pod does not exist yet).
 - No real scikit-learn training code -- function bodies below are stubs.
 - No Tapis service-token handling (Decision 30) -- credential plumbing for
   this Actor's async invocation is unresolved, see this repo's README.
 """
 
+import json
 import os
 
 
 def main():
     """
-    Actor entrypoint. A real Tapis Actor reads its invocation message (JSON,
-    conventionally via the `MSG` environment variable or a mounted file --
-    exact mechanism depends on how this Actor is ultimately registered, see
-    this repo's README "Next steps" item 6) and dispatches to `run()`.
+    Actor entrypoint. Reads the real Abaco invocation message (`MSG` env
+    var, see module docstring) and dispatches to `run()`.
     """
     message = read_actor_message()
     run(message)
@@ -80,7 +100,11 @@ def main():
 
 def read_actor_message():
     """
-    Parse this invocation's message payload.
+    Parse this invocation's message payload from the `MSG` environment
+    variable -- confirmed against Tapis's own Actors docs (Abaco injects the
+    message as `MSG`, a JSON string; see module docstring). Raises a clear,
+    specific error rather than a bare KeyError/JSONDecodeError if `MSG` is
+    unset or malformed, so a misconfigured invocation fails loudly.
 
     Expected shape (per the design spec's `POST .../workspace/train`
     endpoint, which is what queues this Actor):
@@ -92,12 +116,23 @@ def read_actor_message():
             "split_strategy": "spatial_block",
         }
     """
-    raise NotImplementedError(
-        "Actor message parsing is not implemented yet -- no Tapis Actor "
-        "registration exists for this Actor, so the real invocation "
-        "envelope (env var vs. mounted file, message schema) is unconfirmed. "
-        "See design spec 'API Endpoints' > POST .../workspace/train."
-    )
+    raw = os.environ.get('MSG')
+    if raw is None:
+        raise RuntimeError(
+            "MSG environment variable is not set. Abaco injects the "
+            "invocation payload as MSG (confirmed against Tapis's own "
+            "Actors docs) -- this Actor cannot determine what to run "
+            "without it. Check how it was invoked (e.g. "
+            "t.actors.send_message(actor_id=..., request_body={'message': "
+            "...}))."
+        )
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"MSG environment variable is not valid JSON: {e}. "
+            f"Raw MSG value: {raw!r}"
+        ) from e
 
 
 def load_observations(tile_observation_ids, encoder_id):

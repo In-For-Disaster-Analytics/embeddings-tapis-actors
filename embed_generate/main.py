@@ -1,14 +1,32 @@
 """
 embed-generate Tapis Actor -- entrypoint.
 
-SKELETON ONLY. Every function below has a docstring describing what it will
-do once the supporting infrastructure (embeddingsdb Pod, Clay v1.5 checkpoint,
-Tapis Actor registration) exists, and a `NotImplementedError` body -- no
-fabricated logic. See design spec:
+MOSTLY SKELETON, with two real pieces as of this increment (see Decision 35
+in the design spec): the Abaco message contract (`read_actor_message()`) and
+the three embeddingsdb write functions (`write_tile_observation`,
+`write_embedding`, `write_covariates`, delegating to the real `embed_generate.db`
+module). Every other function below still has a docstring describing what it
+will do once the remaining supporting infrastructure (a deployed Clay v1.5
+checkpoint, real WebODM-tiler/STAC-asset pixel access) exists, and a
+`NotImplementedError` body -- no fabricated logic. See design spec:
 WebODM/docs/design/2026-07-22-geospatial-embeddings-classification.md
-(in the odm-suite monorepo-of-repos), Decisions 9, 19, 20, 23, 24, 25, 27,
+(in the odm-suite monorepo-of-repos), Decisions 9, 19, 20, 23, 24, 25, 27, 35,
 and the "New Infrastructure" / "Tile Coverage" / "Raster Source Independence"
 sections.
+
+Real Abaco message contract (confirmed against Tapis's own Actors docs, not
+re-derived here): Abaco injects the invocation payload as the `MSG`
+environment variable -- a JSON string -- and injects context values
+(`_abaco_execution_id`, `_abaco_username`, etc.) as their own env vars.
+`read_actor_message()` below reads `os.environ['MSG']` directly and
+`json.loads()`s it -- the simplest, most portable mechanism, preferred over
+adding a dependency on tapipy's actor-side helpers (`tapipy.actors`) for this.
+Structured-result note, not used here: a real Actor can also return results
+via a Unix socket contract (`/_abaco_results.sock`, tapipy's
+`send_bytes_result()`/`send_python_result()`, retrievable through Tapis's own
+`/results` endpoint) -- this system's real state lives in embeddingsdb, not
+Abaco's results queue, so that mechanism is documented here for completeness
+but genuinely not used.
 
 What this Actor is meant to do, end to end, once implemented
 --------------------------------------------------------------
@@ -46,22 +64,25 @@ design spec's Embeddings DB Schema) and a zoom level:
 
 Explicitly NOT implemented in this increment
 ---------------------------------------------
-- No embeddingsdb connection (the Pod doesn't exist yet).
 - No Clay v1.5 checkpoint loading / no claymodel encoder instantiation.
 - No WebODM tiler HTTP calls, no rio_tiler STAC-asset tiling.
 - No Tapis service-token handling (Decision 30) -- credential plumbing for
   this Actor's async invocation is unresolved, see this repo's README.
+- `run()` itself still raises NotImplementedError before ever reaching the
+  now-real write_* functions below -- see the module docstring's "Real
+  Abaco message contract" note above for what IS real this increment.
 """
 
+import json
 import os
+
+from embed_generate import db
 
 
 def main():
     """
-    Actor entrypoint. A real Tapis Actor reads its invocation message (JSON,
-    conventionally via the `MSG` environment variable or a mounted file --
-    exact mechanism depends on how this Actor is ultimately registered, see
-    this repo's README "Next steps" item 6) and dispatches to `run()`.
+    Actor entrypoint. Reads the real Abaco invocation message (`MSG` env
+    var, see module docstring) and dispatches to `run()`.
     """
     message = read_actor_message()
     run(message)
@@ -69,7 +90,11 @@ def main():
 
 def read_actor_message():
     """
-    Parse this invocation's message payload.
+    Parse this invocation's message payload from the `MSG` environment
+    variable -- confirmed against Tapis's own Actors docs (Abaco injects the
+    message as `MSG`, a JSON string; see module docstring). Raises a clear,
+    specific error rather than a bare KeyError/JSONDecodeError if `MSG` is
+    unset or malformed, so a misconfigured invocation fails loudly.
 
     Expected shape (per the design spec's `POST .../task/{task_pk}/embed`
     endpoint, which is what queues this Actor):
@@ -81,12 +106,23 @@ def read_actor_message():
             "encoder": "clay-v1.5-large-rgb",
         }
     """
-    raise NotImplementedError(
-        "Actor message parsing is not implemented yet -- no Tapis Actor "
-        "registration exists for this Actor, so the real invocation "
-        "envelope (env var vs. mounted file, message schema) is unconfirmed. "
-        "See design spec 'API Endpoints' > POST .../task/{task_pk}/embed."
-    )
+    raw = os.environ.get('MSG')
+    if raw is None:
+        raise RuntimeError(
+            "MSG environment variable is not set. Abaco injects the "
+            "invocation payload as MSG (confirmed against Tapis's own "
+            "Actors docs) -- this Actor cannot determine what to run "
+            "without it. Check how it was invoked (e.g. "
+            "t.actors.send_message(actor_id=..., request_body={'message': "
+            "...}))."
+        )
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"MSG environment variable is not valid JSON: {e}. "
+            f"Raw MSG value: {raw!r}"
+        ) from e
 
 
 def resolve_site_zoom(site_id, requested_zoom, zoom_override):
@@ -173,27 +209,34 @@ def compute_covariates(visit, tile_observation):
 
 
 def write_tile_observation(tile_grid_id, visit_id, pixel_size):
-    """Upsert one `tile_observations` row in embeddingsdb."""
-    raise NotImplementedError(
-        "embeddingsdb writes are not implemented yet -- the Pod does not "
-        "exist yet. See EMBEDDINGSDB_URL in .env.example."
-    )
+    """
+    Real, as of this increment (Decision 35): upsert one `tile_observations`
+    row in embeddingsdb via `embed_generate.db.write_tile_observation()`.
+    Requires `EMBEDDINGSDB_URL` to be set in this Actor's environment (see
+    .env.example) -- raises `db.EmbeddingsDBConfigError`/`EmbeddingsDBError`
+    otherwise. See `db.py` for the real query and its grounding in
+    `schema/embeddingsdb.sql`.
+    """
+    return db.write_tile_observation(tile_grid_id, visit_id, pixel_size)
 
 
 def write_embedding(tile_observation_id, encoder_id, vector):
-    """Write one `embeddings` row (pgvector column) in embeddingsdb."""
-    raise NotImplementedError(
-        "embeddingsdb writes are not implemented yet -- the Pod does not "
-        "exist yet. See EMBEDDINGSDB_URL in .env.example."
-    )
+    """
+    Real, as of this increment (Decision 35): write one `embeddings` row
+    (pgvector column) via `embed_generate.db.write_embedding()`. See `db.py`
+    for how `vector` is formatted for pgvector's text input syntax.
+    """
+    return db.write_embedding(tile_observation_id, encoder_id, vector)
 
 
 def write_covariates(tile_observation_id, covariates):
-    """Write one `covariates` row in embeddingsdb, if `covariates` is not None."""
-    raise NotImplementedError(
-        "embeddingsdb writes are not implemented yet -- the Pod does not "
-        "exist yet. See EMBEDDINGSDB_URL in .env.example."
-    )
+    """
+    Real, as of this increment (Decision 35): write one `covariates` row via
+    `embed_generate.db.write_covariates()`, which is a real no-op (returns
+    None, writes nothing) when `covariates` is falsy -- matching Decision 25
+    ("never backfilled or faked").
+    """
+    return db.write_covariates(tile_observation_id, covariates)
 
 
 def run(message):

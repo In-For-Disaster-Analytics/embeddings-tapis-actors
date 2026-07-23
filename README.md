@@ -6,9 +6,43 @@ Tapis Actors for the Geospatial Embeddings & Classification System: `embed-gener
 Actor code only — the WebODM-side plugin that calls these Actors lives in
 `coreplugins/embeddings/` in the `WebODM` repo.
 
-## Status: embeddingsdb is live; Actors are still skeleton-only
+## Status: embeddingsdb is live; both Actors have a real message contract; `embed-generate` has real DB writes; registration is dry-run-only
 
-**Neither Actor runs real logic yet**, but `embeddingsdb` itself is real and running:
+**As of 2026-07-23 (Decision 35):**
+
+- Both Actors' `read_actor_message()` is real: confirmed against Tapis's own Actors
+  docs that Abaco injects the invocation payload as the `MSG` environment variable
+  (a JSON string) — `main.py` in each Actor reads `os.environ['MSG']` and
+  `json.loads()`s it, raising a clear `RuntimeError`/`ValueError` (not a bare
+  `KeyError`/`JSONDecodeError`) if it's unset or malformed. Verified end-to-end:
+  built both Docker images, ran each with a realistic `MSG` payload, confirmed
+  each parses correctly and dispatches into `run()`, failing with the *expected*
+  `NotImplementedError` (deeper logic, not a message-parsing crash) — and
+  confirmed the unset/malformed-`MSG` failure modes give the new, specific errors.
+- `embed_generate/db.py` (new) implements real `psycopg2` writes for
+  `write_tile_observation`, `write_embedding`, `write_covariates` — every column
+  read directly from `schema/embeddingsdb.sql`, mirroring
+  `coreplugins/embeddings/embeddings_client.py`'s style (Decision 34). Verified
+  against the live `embeddingsdb` Pod in a transaction that was rolled back
+  afterward — confirmed 0 rows persisted.
+- `tapis/register_actor.py` (new) registers both Actors, mirroring
+  `register_pod.py`'s `--dry-run`/`.env` conventions, adapted for the real
+  Actors API (`create_actor`, not `create_pod`). `--dry-run` was actually run and
+  confirmed working. The non-dry-run path (and the `docker push` to Docker Hub
+  it depends on) was **not** run — no Docker Hub or Tapis credentials exist in
+  this environment.
+- **Still stubs, unchanged in scope:** `embed_generate`'s tile enumeration, pixel
+  fetching, Clay v1.5 inference (`run()` still raises `NotImplementedError`
+  before reaching the now-real write functions); all of `model_train` beyond its
+  message-contract fix (its own embeddingsdb/MLflow un-stubbing is later work).
+
+See design spec Decision 35 for the full account, including the real facts this
+increment is grounded in (confirmed against Tapis's own Actors docs) and every
+judgment call flagged along the way (Docker Hub image-name placeholder,
+`find_existing_actor_id()`'s assumption about the Actors API's list/lookup
+shape, and Decision 30's credential question, still unresolved).
+
+`embeddingsdb` itself is real and running, per Decision 33:
 
 - `embeddingsdb` — **live**, as of 2026-07-23. Postgres 17.5 + PostGIS 3.5.2 + pgvector
   0.8.5, full schema applied (all 13 tables from `schema/embeddingsdb.sql`), verified
@@ -90,17 +124,30 @@ Tuning, and Diagnostics**, and **Experiment Tracking and Model Registry: MLflow*
 
 ## What is NOT in this increment
 
-- No real database I/O (`embeddingsdb` connection code is not written — there is
-  nothing running to connect to yet).
-- No real MLflow calls.
 - No real Clay v1.5 inference — no checkpoint loading, no `claymodel` encoder
   instantiation.
-- No real STAC API or WebODM-tiler HTTP calls.
-- No Tapis Actor registration script (the `embed-generate`/`model-train` equivalent of
-  this repo's own `tapis/register_pod.py`, added this increment — but that script
-  registers a Tapis **Pod**, not an **Actor**; Actor registration is a different Tapis
-  API and is not designed here).
-- No tests yet — there is no real behavior to test.
+- No real STAC API or WebODM-tiler HTTP calls, no real tile enumeration/pixel
+  fetching — `embed_generate/main.py`'s `run()` still raises `NotImplementedError`
+  before it would ever reach the now-real `write_*` functions (Decision 35).
+- No real `model_train` database or MLflow I/O — only its message contract
+  (`read_actor_message()`/`main()`) was fixed this increment (Decision 35);
+  un-stubbing the rest of `model_train` (its own DB client module, MLflow
+  client, scikit-learn training code) is explicitly separate, later work.
+- `tapis/register_actor.py`'s **non-dry-run path was not run** — no Docker Hub
+  or Tapis credentials exist in this environment. Neither was `docker push`.
+  Only `--dry-run` has been exercised for real.
+- `tapis/register_actor.py`'s upsert-by-name logic (`find_existing_actor_id()`)
+  assumes a specific `t.actors.list_actors()` return shape that was **not**
+  independently confirmed against a live Tapis tenant this session — flagged
+  in that function's own docstring as a judgment call, not one of this
+  increment's confirmed facts.
+- Decision 30's credential question (stored service token vs. per-request JWT
+  for the Actors' own async invocation) remains **unresolved** —
+  `register_actor.py`'s `default_environment` is static registration-time
+  config, not a live credential, and cannot resolve it by itself.
+- No tests yet — there is no test framework in this repo; verification this
+  increment was done by actually building the Docker images and running them
+  (see design spec Decision 35), not via a unit-test suite.
 
 ## How a future implementer should proceed
 
@@ -122,22 +169,53 @@ Roughly in dependency order, since each of these unblocks the next:
    (`embeddings-research/clay-model-src`) actually get vendored into this repo's
    runtime — they are not committed here (see `requirements.txt` for why `claymodel`
    isn't a normal pip dependency).
-4. Implement `embed_generate/main.py`'s functions against a real `embeddingsdb`
-   connection and a real Clay v1.5 checkpoint, function by function, replacing each
-   `NotImplementedError`.
-5. Implement `model_train/main.py`'s functions the same way, against real
-   `embeddingsdb` + `mlflow` connections.
-6. Write a Tapis Actor registration script for both Actors (mirroring
-   `label-studio-tapis-auth/tapis/register_pod.py`'s `--dry-run`/upsert conventions,
-   adjusted for Tapis's Actor registration API rather than its Pods API — these are
-   different Tapis subsystems, do not assume the same script works unmodified).
-7. Wire `coreplugins/embeddings/embeddings_client.py` (in the `WebODM` repo, not yet
-   created — see that repo's own design spec "Files Likely Affected") to actually
-   invoke these Actors by ID.
-8. Add real unit/integration tests once there is real behavior to test (see the design
-   spec's **Test Plan** section, items 2-3, for what's expected of
-   `embeddings_client.py`'s Actor-invocation payload shape, which these Actors must
-   accept).
+4. ~~Confirm the real Abaco message contract (`MSG` env var) and wire it into both
+   Actors' `read_actor_message()`.~~ **Done** (2026-07-23, Decision 35). Confirmed
+   against Tapis's own Actors docs, verified end-to-end via Docker (built both
+   images, ran each with a realistic payload, confirmed correct parsing + dispatch
+   into `run()`, plus the unset/malformed-`MSG` failure modes).
+5. ~~Implement `embed_generate/main.py`'s embeddingsdb write functions
+   (`write_tile_observation`/`write_embedding`/`write_covariates`).~~ **Done**
+   (2026-07-23, Decision 35), via new `embed_generate/db.py`. Verified against the
+   live Pod in a rolled-back transaction. **Not done**: everything upstream of
+   these writes (tile enumeration, pixel fetching, Clay v1.5 inference) — still
+   real `NotImplementedError` stubs; a real Clay v1.5 checkpoint and the
+   `claymodel` encoder package (`embeddings-research/clay-model-src`) still need
+   to be vendored into this repo's runtime before those can be un-stubbed (see
+   `requirements.txt` for why `claymodel` isn't a normal pip dependency).
+6. Stand up the `mlflow` Pod (backend store can share the `embeddingsdb` Postgres
+   instance per the design spec; artifact store on a persistent Tapis Volume).
+7. Implement `model_train/main.py`'s remaining functions (`load_observations`,
+   `validate_label_counts`, `split_data`, `tune_hyperparameters`,
+   `compute_diagnostics`, `log_to_mlflow`, `write_model_rows`, `run`) against real
+   `embeddingsdb` + `mlflow` connections — a new `model_train/db.py` (mirroring
+   `embed_generate/db.py`'s style) and an `mlflow` client are both still needed;
+   explicitly out of scope for the Decision 35 increment, which only fixed
+   `model_train`'s message contract.
+8. ~~Write a Tapis Actor registration script for both Actors.~~ **Done**
+   (2026-07-23, Decision 35): `tapis/register_actor.py`, mirroring
+   `register_pod.py`'s `--dry-run`/upsert conventions, adapted for the real
+   Actors API (`create_actor`/`send_message`, confirmed against Tapis's own
+   docs — not `create_pod`/`get_pod`). **Not done**: the actual `docker push` to
+   public Docker Hub (Abaco's real image-source requirement, also confirmed this
+   increment — see the Dockerfile's own note) and the script's non-dry-run
+   registration call itself — no Docker Hub or Tapis credentials exist in this
+   environment. Once both Actors are registered for real, update
+   `WO_EMBEDDINGS_ACTOR_ID`/`WO_MODEL_ACTOR_ID` in WebODM's settings with the
+   real `actor_id`s the script prints.
+9. Wire `coreplugins/embeddings/embeddings_client.py`'s `queue_embed_generate()`/
+   `queue_model_train()` (in the `WebODM` repo — real client module exists per
+   Decision 34, but these two functions are still deliberate
+   `NotImplementedError` stubs) to actually invoke these Actors by ID, once step
+   8's registration has produced real `actor_id`s. This is also where Decision
+   30's still-open credential question (stored service token vs. per-request
+   JWT for the Actors' own async authorization to embeddingsdb/Tapis) needs to
+   finally be resolved — `register_actor.py`'s `default_environment` is static
+   registration-time config and cannot resolve it.
+10. Add real unit/integration tests once there is real behavior to test (see the
+    design spec's **Test Plan** section, items 2-3, for what's expected of
+    `embeddings_client.py`'s Actor-invocation payload shape, which these Actors
+    must accept).
 
 Update this README's Status section, and the design spec's own Status/Decisions
 sections, as each step above actually lands.
