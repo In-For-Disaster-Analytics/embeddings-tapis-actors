@@ -1,0 +1,80 @@
+{
+  "id": "embed-generate-ls6",
+  "version": "1.0.0",
+  "description": "Runs the embed-generate Clay v1.5 pipeline as a Tapis Job on TACC Lonestar6, replacing the embed-generate Actor (Abaco) -- see design spec Decision 45. Abaco's worker pool cannot provision for this workload's image size (confirmed: both an ~11.4GB and a ~6.21GB image failed identically); an HPC compute node's disk/memory envelope does not have that ceiling.",
+  "owner": "${apiUserId}",
+  "enabled": true,
+  "runtime": "ZIP",
+  "runtimeVersion": "",
+  "containerImage": "tapis://cloud.data/corral-repl/tacc/aci/PT2050/projects/PTDATAX-225/embeddings/embed-generate-ls6.zip",
+  "jobType": "BATCH",
+  "maxJobs": -1,
+  "maxJobsPerUser": -1,
+  "strictFileInputs": false,
+  "jobAttributes": {
+    "description": null,
+    "dynamicExecSystem": false,
+    "execSystemConstraints": null,
+    "execSystemId": "ls6",
+    "execSystemExecDir": "${JobWorkingDir}",
+    "execSystemInputDir": "${JobWorkingDir}/inputs",
+    "execSystemOutputDir": "${JobWorkingDir}/output",
+    "execSystemLogicalQueue": "vm-small",
+    "archiveSystemId": "cloud.data",
+    "archiveSystemDir": "HOST_EVAL($HOME)/tapis-jobs-archive/${JobCreateDate}/${JobName}-${JobUUID}",
+    "archiveOnAppError": true,
+    "isMpi": false,
+    "parameterSet": {
+      "appArgs": [],
+      "schedulerOptions": [
+        {
+          "name": "TACC Scheduler Profile",
+          "description": "Scheduler profile for HPC clusters at TACC -- required for apptainer module access, same as nodeodm-ls6.",
+          "inputMode": "FIXED",
+          "arg": "--tapis-profile tacc-apptainer",
+          "notes": { "isHidden": true }
+        }
+      ],
+      "envVariables": [
+        {
+          "key": "MSG",
+          "value": "",
+          "description": "The embed-generate invocation payload (visit_id, site_id, zoom, zoom_override, encoder, project_pk, webodm_jwt) -- a JSON string, identical contract to the Abaco Actor's MSG env var (embed_generate/main.py's read_actor_message() is unchanged by this decision; only the delivery mechanism differs). Real value supplied per-job at submission time by apply_embed_generate(), not here."
+        },
+        {
+          "key": "EMBEDDINGSDB_URL",
+          "value": "",
+          "description": "Real value supplied per-job at submission time (or fixed at registration time if this becomes a static per-deployment constant -- TBD)."
+        },
+        {
+          "key": "WEBODM_URL",
+          "value": "https://webodm.tacc.utexas.edu",
+          "description": "Production WebODM host, confirmed reachable from TACC systems the same way ClusterODM/nodeodm-ls6 already reach it (Decision 45, resolved 2026-07-24)."
+        }
+      ],
+      "archiveFilter": {
+        "includes": [],
+        "excludes": [],
+        "includeLaunchFiles": true
+      }
+    },
+    "fileInputs": [],
+    "fileInputArrays": [],
+    "nodeCount": 1,
+    "coresPerNode": 4,
+    "memoryMB": 32768,
+    "maxMinutes": 60,
+    "subscriptions": [],
+    "tags": []
+  },
+  "tags": ["portalName: ALL"],
+  "notes": {
+    "label": "embed-generate on LS6",
+    "helpText": "Runs Clay v1.5 embedding generation for a WebODM task's tiles as a batch job on Lonestar6, replacing the embed-generate Tapis Actor (which cannot provision workers for this image's size).",
+    "hideNodeCountAndCoresPerNode": false,
+    "isInteractive": false,
+    "icon": "microchip",
+    "category": "Data Processing",
+    "queueFilter": ["vm-small", "normal", "development", "gpu-a100", "gpu-a100-dev", "gpu-a100-small"]
+  }
+}
