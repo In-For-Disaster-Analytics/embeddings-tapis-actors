@@ -27,22 +27,27 @@ installed `tapipy` package this session (not assumed from docs):
       `apply_embed_generate()`, not this script) follows the identical
       non-empty-properties rule.
 
-See `ls6/app.json` for the real App spec this script loads and registers,
-and `ls6/tapisjob_app.sh` for what Tapis actually executes on the ls6
-compute node once a job runs. Design spec Decision 45
+See `ls6/app.json` for the real App spec this script loads and registers.
+Design spec Decision 45
 (WebODM/docs/design/2026-07-22-geospatial-embeddings-classification.md)
 records why this exists: the embed-generate Actor (Abaco) cannot provision
 a worker for this workload's image size on this tenant.
 
+Runtime shape corrected after drafting (Decision 45 follow-up, per
+In-For-Disaster-Analytics/Cookbook-Conda-Template and
+Cookbook-Docker-Template -- the real, working pattern for a plain-Docker
+Tapis App on ls6, simpler than nodeodm-ls6's own ZIP-runtime approach,
+which exists for NodeODM's different needs -- a long-running interactive
+service with TAP web access): `runtime: "SINGULARITY"` +
+`containerImage: "docker://ghcr.io/..."` lets Tapis pull and run the image
+via Apptainer directly, executing the image's own ENTRYPOINT
+(`Dockerfile.embed-generate`'s `python -m embed_generate.main`) -- no
+custom ZIP package, no separate job script, and nothing to build or upload
+to `cloud.data` beforehand.
+
 CAUTION, stated plainly rather than assumed: this script's non-dry-run path
 has NOT been run against a live Tapis tenant as of writing -- only
-`--dry-run` has been exercised. The App's `containerImage` field points at
-a ZIP file path on the `cloud.data` Tapis storage system
-(`tapis://cloud.data/.../embed-generate-ls6.zip`) that must actually be
-uploaded there first (build a ZIP of this directory's `app.json` +
-`tapisjob_app.sh`, then SCP/SFTP it to the path in `ls6/app.json`'s own
-`containerImage` field, mirroring `nodeodm-ls6/README.md`'s own documented
-upload step) -- this script does not build or upload that ZIP itself.
+`--dry-run` has been exercised.
 
 Usage:
     export TAPIS_USERNAME=... TAPIS_PASSWORD=...      # or you'll be prompted
@@ -125,10 +130,11 @@ def main(argv=None) -> int:
     if args.dry_run:
         print(json.dumps(mask_secrets(spec), indent=2))
         print(
-            "\nNOTE: containerImage above points at a ZIP on the cloud.data "
-            "Tapis storage system that must be uploaded there first (build "
-            "a ZIP of ls6/app.json + ls6/tapisjob_app.sh, then SCP/SFTP it "
-            "to that path) -- this script does not build or upload it."
+            "\nNOTE: containerImage above is a docker:// reference -- Tapis "
+            "pulls and runs it directly via Apptainer (runtime: SINGULARITY), "
+            "same as Cookbook-Conda-Template/Cookbook-Docker-Template. "
+            "Nothing needs to be built or uploaded to cloud.data first; the "
+            "image just needs to already be public on GHCR (it is)."
         )
         return 0
 
