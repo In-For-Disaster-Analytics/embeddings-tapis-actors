@@ -2,9 +2,16 @@ name: Build and push Actor images
 
 # Mirrors label-studio-tapis-auth/.github/workflows/docker-build.yml (the
 # proven GHCR pattern already used for that repo's Tapis Pod image), matrixed
-# over this repo's two Actors since both share one Dockerfile parameterized
-# by the ACTOR build-arg (see Dockerfile's own comments) rather than two
-# separate Dockerfiles.
+# over this repo's two Actors. Each has its OWN Dockerfile as of the ls6
+# split (Decision 45) -- Dockerfile.embed-generate (needs the vendored Clay
+# source + a ~4.8GB checkpoint this CI checkout genuinely cannot obtain yet,
+# a real, flagged, still-unresolved gap -- see that Dockerfile's own header)
+# and Dockerfile.model-train (no Clay dependency at all -- builds cleanly).
+# `fail-fast: false` so embed-generate's known-failing build doesn't cancel
+# model-train's genuinely-succeeding one (that's exactly what happened
+# before this was added: model-train failed first under the old shared
+# Dockerfile, and GitHub Actions' default fail-fast cancelled embed-generate's
+# job too, hiding which one was the real problem).
 #
 # GHCR package visibility: new packages default to PRIVATE. Abaco (Tapis
 # Actors) pulls anonymously, same requirement as the Pods precedent -- after
@@ -36,13 +43,16 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         actor: [embed_generate, model_train]
         include:
           - actor: embed_generate
             tag_suffix: embed-generate
+            dockerfile: Dockerfile.embed-generate
           - actor: model_train
             tag_suffix: model-train
+            dockerfile: Dockerfile.model-train
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,8 +80,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          build-args: |
-            ACTOR=${{ matrix.actor }}
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

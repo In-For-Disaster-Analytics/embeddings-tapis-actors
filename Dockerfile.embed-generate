@@ -1,0 +1,39 @@
+# embeddings-tapis-actors -- embed-generate image
+#
+# Split from the old combined Dockerfile once embed_generate's and
+# model_train's runtime needs genuinely diverged (Decision 44): embed_generate
+# needs Clay v1.5 (vendored source + a ~4.8GB checkpoint); model_train needs
+# neither. Keeping them in one Dockerfile meant model_train's CI build failed
+# on the same missing-checkpoint problem embed_generate has, for no reason --
+# see Dockerfile.model-train, which has none of this.
+#
+# REAL, FLAGGED GAP (unchanged by this split): the GHCR CI workflow
+# (.github/workflows/docker-build.yml, `context: .`, single-repo checkout)
+# still has no way to obtain vendor/clay-v1.5.ckpt (~4.8GB, gitignored, never
+# committed) -- a real CI build of THIS image will still fail at the
+# checkpoint COPY step until the checkpoint is fetched from somewhere CI can
+# reach (a Tapis Files endpoint, a release asset, git-lfs, etc. -- not decided
+# here). Verified to build and run correctly LOCALLY, where the checkpoint is
+# physically present (see design spec Decision 44). Also, as of Decision 45,
+# embed-generate itself no longer runs as a Tapis Actor at all -- Abaco's
+# worker pool can't provision a worker for this image's size on this tenant
+# -- it runs as a Tapis Job on TACC's ls6 instead (see ls6/), which pulls
+# this SAME GHCR image via Apptainer directly onto the HPC compute node.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Decision 39/44: vendored Clay v1.5 source + checkpoint.
+COPY vendor/clay-model-src ./vendor/clay-model-src
+RUN pip install --no-cache-dir -e ./vendor/clay-model-src
+COPY vendor/clay-v1.5.ckpt /models/clay-v1.5.ckpt
+ENV CLAY_MODEL_DIR=/app/vendor/clay-model-src
+ENV CLAY_CHECKPOINT_PATH=/models/clay-v1.5.ckpt
+
+COPY embed_generate ./embed_generate
+
+ENTRYPOINT ["python", "-m", "embed_generate.main"]

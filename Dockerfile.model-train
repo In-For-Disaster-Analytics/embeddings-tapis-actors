@@ -1,0 +1,21 @@
+# embeddings-tapis-actors -- model-train image
+#
+# Split from the old combined Dockerfile once embed_generate's and
+# model_train's runtime needs genuinely diverged (Decision 44) -- see
+# Dockerfile.embed-generate's own header comment for the full story.
+# model_train has no real logic yet beyond its message contract (Decision
+# 35) -- no Clay, no vendored source, no checkpoint -- so this image is
+# just requirements.txt + model_train's own code. Builds cleanly in CI
+# (unlike Dockerfile.embed-generate, which cannot obtain the Clay
+# checkpoint in this repo's current single-repo CI checkout).
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY model_train ./model_train
+
+ENTRYPOINT ["python", "-m", "model_train.main"]
