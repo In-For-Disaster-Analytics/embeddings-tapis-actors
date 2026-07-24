@@ -105,16 +105,15 @@ ACTORS = {
             "writing tile_observations/embeddings/covariates to embeddingsdb. "
             "See design spec Decisions 9, 19, 20, 23, 24, 25, 27, 35."
         ),
-        # embed_generate/db.py (added this increment, Decision 35) reads
-        # EMBEDDINGSDB_URL directly via os.environ.get() -- this is the one
-        # real env var this Actor's code consumes so far. Every other
-        # function in embed_generate/main.py (tile enumeration, pixel
-        # fetching, Clay inference) is still a NotImplementedError stub and
-        # reads no env vars of its own yet (CLAY_CHECKPOINT_PATH/
-        # CLAY_MODEL_DIR exist only in .env.example as forward-looking
-        # documentation -- the code doesn't call os.environ.get() for them
-        # yet, so they are deliberately NOT listed here).
-        "env_keys": ["EMBEDDINGSDB_URL"],
+        # Decision 44: embed_generate/main.py's run() is now real and calls
+        # os.environ.get('WEBODM_URL') directly -- a genuine, newly-added
+        # env key, not present when this Actor was first registered
+        # (Decision 37, before run() had any real logic). CLAY_CHECKPOINT_PATH/
+        # CLAY_MODEL_DIR are deliberately NOT listed here even though the
+        # code reads them too -- Decision 39/44 bakes them into the image
+        # itself as Dockerfile ENV defaults, so they don't need to be part
+        # of the Actor's registered default_environment.
+        "env_keys": ["EMBEDDINGSDB_URL", "WEBODM_URL"],
         "image_tag_suffix": "embed-generate",
     },
     "model-train": {

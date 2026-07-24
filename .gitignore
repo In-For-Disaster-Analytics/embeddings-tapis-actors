@@ -42,8 +42,13 @@ htmlcov/
 .idea/
 .DS_Store
 
-# Large model artifacts -- checkpoints are not committed to this repo (see
-# README "Status: skeleton only" -- CLAY_CHECKPOINT_PATH points outside the repo)
+# Large model artifacts -- Decision 39 bakes the Clay v1.5 checkpoint into
+# the Actor's Docker image (see Dockerfile), but the checkpoint ITSELF
+# (~4.8GB, vendor/clay-v1.5.ckpt) is never committed to git -- copied there
+# locally for `docker build` to pick up. See Decision 44's own note on the
+# still-unresolved gap this creates for the real GHCR CI pipeline
+# (.github/workflows/docker-build.yml only checks out this repo, so it has
+# no way to obtain this file yet).
 *.ckpt
 *.pth
 *.pt

@@ -122,6 +122,16 @@ CREATE TABLE visits (
     -- in Decision 26, not by Postgres itself.
     webodm_task_id      uuid,
 
+    -- Decision 41: which WebODM project webodm_task_id's task belongs to.
+    -- Needed because WebODM's own tiler endpoint is project-nested
+    -- (projects/{project_pk}/tasks/{pk}/orthophoto/tiles/{z}/{x}/{y}) --
+    -- embed-generate has no other way to construct that URL from visit_id
+    -- alone. Integer, matching Project's plain Django AutoField pk (not a
+    -- UUID) -- NOT a real FK for the same reason webodm_task_id isn't one
+    -- (separate Postgres instance from webodm_dev). Nullable for the same
+    -- reason webodm_task_id is: non-webodm visits have no WebODM project.
+    project_pk          integer,
+
     -- Decision 19/20/23: nullable, populated independently of `source` --
     -- a source='webodm' visit gets these once its task is opted into
     -- "Publish to STAC" (Decision 20); a source='stac' visit has these from
@@ -145,6 +155,11 @@ COMMENT ON COLUMN visits.webodm_task_id IS
     'here, not as a field on WebODM''s Task model -- Decision 26 (zero '
     'WebODM-database schema changes). Not a real FK: separate Postgres '
     'instance from webodm_dev.';
+COMMENT ON COLUMN visits.project_pk IS
+    'Maps to WebODM''s own Project.id (plain integer AutoField, '
+    'app/models/project.py). Decision 41 -- needed to construct WebODM''s '
+    'project-nested tiler URL from embed-generate. Not a real FK: separate '
+    'Postgres instance from webodm_dev.';
 COMMENT ON COLUMN visits.stac_collection_id IS
     'DSO STAC API (modflow-suite/stac-platform) collection id. Populated '
     'for source=''stac'' visits, and for source=''webodm'' visits once '

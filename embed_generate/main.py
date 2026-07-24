@@ -1,18 +1,23 @@
 """
 embed-generate Tapis Actor -- entrypoint.
 
-MOSTLY SKELETON, with two real pieces as of this increment (see Decision 35
-in the design spec): the Abaco message contract (`read_actor_message()`) and
-the three embeddingsdb write functions (`write_tile_observation`,
-`write_embedding`, `write_covariates`, delegating to the real `embed_generate.db`
-module). Every other function below still has a docstring describing what it
-will do once the remaining supporting infrastructure (a deployed Clay v1.5
-checkpoint, real WebODM-tiler/STAC-asset pixel access) exists, and a
-`NotImplementedError` body -- no fabricated logic. See design spec:
+Real as of this increment (Decision 44, following Decisions 35/37/40/41):
+the full `run()` pipeline for a WebODM-sourced visit (`visits.stac_item_id
+IS NULL`) -- site-zoom resolution, tile enumeration via WebODM's own tiler,
+per-tile pixel fetch, real Clay v1.5 inference (`embed_generate.clay`), and
+embeddingsdb writes (`embed_generate.db`). See design spec:
 WebODM/docs/design/2026-07-22-geospatial-embeddings-classification.md
-(in the odm-suite monorepo-of-repos), Decisions 9, 19, 20, 23, 24, 25, 27, 35,
-and the "New Infrastructure" / "Tile Coverage" / "Raster Source Independence"
-sections.
+(in the odm-suite monorepo-of-repos), Decisions 9, 19, 20, 23, 24, 25, 27,
+35, 37, 39, 40, 41, 44, and the "New Infrastructure" / "Tile Coverage" /
+"Raster Source Independence" sections.
+
+Explicitly NOT implemented in this increment (Decision 40's own scope cut):
+- The STAC-asset tiling branch (Decisions 19/20/23) -- `enumerate_tiles()`
+  raises `NotImplementedError` for a `stac_item_id`-bearing visit rather
+  than silently mishandling it.
+- Real DSM/DTM/multispectral-derived `covariates` -- `compute_covariates()`
+  always returns None this increment; see its own docstring for exactly
+  why (not simply "not gotten to yet" -- a real, stated technical gap).
 
 Real Abaco message contract (confirmed against Tapis's own Actors docs, not
 re-derived here): Abaco injects the invocation payload as the `MSG`
@@ -27,56 +32,16 @@ via a Unix socket contract (`/_abaco_results.sock`, tapipy's
 `/results` endpoint) -- this system's real state lives in embeddingsdb, not
 Abaco's results queue, so that mechanism is documented here for completeness
 but genuinely not used.
-
-What this Actor is meant to do, end to end, once implemented
---------------------------------------------------------------
-Given an invocation payload identifying one `visit` (a WebODM task's
-orthophoto, or an already-imported STAC item -- see the `visits` table in the
-design spec's Embeddings DB Schema) and a zoom level:
-
-1. Resolve the `site_id` the visit belongs to (user-chosen at trigger time,
-   never inferred -- Decision 27) and that site's LOCKED zoom, if one is
-   already set by an earlier visit (Decision 24). Honor `zoom_override` if
-   the caller explicitly requested a different zoom than the site's existing
-   `tile_grid` rows use.
-2. Enumerate every valid `(z, x, y)` tile at that zoom for the visit's
-   raster -- NOT a hand-picked subset (Decision 9):
-   - If the visit has no `stac_item_id`: enumerate via WebODM's own tiler
-     coverage logic (mirrors `app/api/tiler.py`'s `tile_exists(z, x, y)`
-     checks against the orthophoto's real bounds) and fetch each tile's
-     pixels from WebODM's own `/tiles/{z}/{x}/{y}` endpoint.
-   - If the visit HAS a `stac_item_id` (a genuinely STAC-sourced visit, or a
-     `webodm`-origin visit already published to the DSO STAC API -- Decision
-     20's refinement of the branch condition): resolve the STAC item's COG
-     asset href and enumerate/fetch tiles via `rio_tiler` directly against
-     that asset -- the same library WebODM's own tiler already depends on.
-3. For each tile: ensure a `tile_observations` row exists (keyed by
-   `tile_grid_id`, `visit_id`), run the Clay v1.5 encoder (RGB-only, per the
-   approved Phase 1 recommendation) over the tile's pixels, and write an
-   `embeddings` row (`tile_observation_id`, `encoder_id`, `vector`).
-4. Separately, where DSM/DTM/multispectral bands exist for this visit's
-   source, compute `covariates` (elevation, slope, aspect, CHM, NDVI, NDWI,
-   ...) for each `tile_observation` -- inside this same Actor run, not a
-   separate Actor (Decision 25). Absent where the source bands don't exist;
-   never backfilled or faked.
-5. Report status back (however `.../task/{pk}/embed-status` polling is wired
-   up to observe it -- not designed in this increment).
-
-Explicitly NOT implemented in this increment
----------------------------------------------
-- No Clay v1.5 checkpoint loading / no claymodel encoder instantiation.
-- No WebODM tiler HTTP calls, no rio_tiler STAC-asset tiling.
-- No Tapis service-token handling (Decision 30) -- credential plumbing for
-  this Actor's async invocation is unresolved, see this repo's README.
-- `run()` itself still raises NotImplementedError before ever reaching the
-  now-real write_* functions below -- see the module docstring's "Real
-  Abaco message contract" note above for what IS real this increment.
 """
 
 import json
+import logging
 import os
 
-from embed_generate import db
+from embed_generate import clay, db, webodm_client
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -97,13 +62,26 @@ def read_actor_message():
     unset or malformed, so a misconfigured invocation fails loudly.
 
     Expected shape (per the design spec's `POST .../task/{task_pk}/embed`
-    endpoint, which is what queues this Actor):
+    endpoint, which is what queues this Actor -- extended per Decision 41
+    with `project_pk`/`webodm_jwt`):
         {
             "visit_id": "...",       # embeddingsdb visits.id
             "site_id": "...",        # user-chosen, Decision 27
             "zoom": 19,
             "zoom_override": False,  # Decision 24/27
             "encoder": "clay-v1.5-large-rgb",
+            "project_pk": 1,         # Decision 41 -- WebODM Project.id
+            "webodm_jwt": "...",     # Decision 44 (correcting Decision 41):
+                                     #   a WebODM-NATIVE JWT minted for the
+                                     #   requesting user (rest_framework_jwt),
+                                     #   NOT the per-user Tapis access token
+                                     #   used to invoke this Actor itself --
+                                     #   those are different tokens with
+                                     #   different signing secrets, confirmed
+                                     #   by testing the Tapis token directly
+                                     #   against WebODM's tiler endpoint (it
+                                     #   fails). Forwarded to WebODM's tiler
+                                     #   endpoint as ?jwt=.
         }
     """
     raw = os.environ.get('MSG')
@@ -113,8 +91,7 @@ def read_actor_message():
             "invocation payload as MSG (confirmed against Tapis's own "
             "Actors docs) -- this Actor cannot determine what to run "
             "without it. Check how it was invoked (e.g. "
-            "t.actors.send_message(actor_id=..., request_body={'message': "
-            "...}))."
+            "t.actors.sendMessage(actor_id=..., message=...))."
         )
     try:
         return json.loads(raw)
@@ -127,128 +104,217 @@ def read_actor_message():
 
 def resolve_site_zoom(site_id, requested_zoom, zoom_override):
     """
-    Decision 24/27: look up whether `site_id` already has `tile_grid` rows at
-    a different zoom than `requested_zoom`. If so and `zoom_override` is not
-    set, this should fail loudly (the caller -- WebODM's plugin -- is
-    responsible for surfacing the UI confirmation warning before ever
-    reaching this Actor). If no `tile_grid` rows exist yet for this site,
-    `requested_zoom` becomes the site's locked zoom.
+    Decision 24/27: a site's zoom is locked by its first `tile_grid` row.
+    WebODM's own `TaskEmbedView.post()` already runs this exact check
+    (`embeddings_client.get_site_zoom()`) and returns 409 before ever
+    queuing this Actor if it would mismatch without `zoom_override` -- so
+    reaching this Actor with a real mismatch should not normally happen.
+    This is a defense-in-depth re-check (e.g. against a race between two
+    concurrent embed calls for the same site), not a duplicate of the UI
+    flow -- there is no user watching this Actor's own failure, so it fails
+    loudly (raises) rather than trying to surface a 409-shaped response.
+
+    Returns the effective zoom to use -- always `requested_zoom` itself
+    (an override doesn't retroactively change already-embedded tiles' zoom,
+    it just permits this run to proceed at a new one).
     """
-    raise NotImplementedError(
-        "Site zoom resolution is not implemented yet -- depends on the "
-        "embeddingsdb Pod's tile_grid table, which does not exist yet."
-    )
+    existing_zoom = db.get_site_zoom(site_id)
+    if existing_zoom is not None and existing_zoom != requested_zoom and not zoom_override:
+        raise RuntimeError(
+            f"Site {site_id} already has tile_grid rows at zoom "
+            f"{existing_zoom}, but this invocation requested zoom "
+            f"{requested_zoom} without zoom_override. WebODM's own "
+            f"TaskEmbedView should have already blocked this with a 409 "
+            f"before queuing this Actor (Decision 24/27) -- failing here "
+            f"as defense-in-depth, not as the primary check."
+        )
+    return requested_zoom
 
 
 def enumerate_tiles(visit, zoom):
     """
-    Decision 9: return every valid (z, x, y) at `zoom` for `visit`'s raster --
-    the full coverage set, never a hand-picked subset.
+    Decision 9: return every candidate (x, y) at `zoom` for `visit`'s
+    raster's bounding box -- NOT yet the final coverage set (that's
+    `fetch_tile_pixels()`'s own 404 handling in `run()`, mirroring WebODM's
+    own `tile_exists()` check, which this function does not reimplement).
 
-    Branches per Decision 19/20:
-    - visit.stac_item_id is None -> enumerate via WebODM's own tiler coverage
-      logic (mirrors app/api/tiler.py's tile_exists(z, x, y) against the
-      orthophoto's real bounds).
-    - visit.stac_item_id is set -> resolve the STAC item's asset href and
-      enumerate via rio_tiler directly against that asset.
+    Decision 40: only the `stac_item_id is None` (WebODM-sourced) branch is
+    implemented this increment. A `stac_item_id`-bearing visit would need
+    the STAC-asset/`rio_tiler` tiling path (Decisions 19/20/23) instead --
+    explicitly not built yet, so this raises rather than silently
+    mishandling it.
     """
-    raise NotImplementedError(
-        "Tile enumeration is not implemented yet -- depends on WebODM's own "
-        "tiler (webodm-sourced visits) or a real STAC item asset href "
-        "(stac_item_id-bearing visits). See design spec 'Tile Coverage' and "
-        "'Raster Source Independence' sections, Decisions 9, 19, 20."
+    if visit.get('stac_item_id'):
+        raise NotImplementedError(
+            "STAC-asset tiling (Decisions 19/20/23) is not implemented in "
+            "this increment (Decision 40) -- this visit has a stac_item_id "
+            "and needs rio_tiler-against-asset-href tiling, not WebODM's "
+            "own tiler endpoint."
+        )
+    _minzoom, _maxzoom, bounds = webodm_client.get_tile_coverage(
+        visit['webodm_url'], visit['project_pk'], visit['webodm_task_id'],
+        visit['webodm_jwt'],
     )
+    return list(webodm_client.candidate_tiles(bounds, zoom))
 
 
 def fetch_tile_pixels(visit, z, x, y):
     """
-    Fetch the actual pixel data for one (z, x, y) tile, via whichever source
-    `enumerate_tiles` determined applies to this visit (WebODM's own tiler
-    endpoint, or rio_tiler against a STAC asset href).
+    Fetch one (z, x, y) tile's real pixels from WebODM's own tiler endpoint
+    (Decision 40's WebODM-sourced branch; Decision 41's jwt-authenticated
+    request). Raises `webodm_client.TileNotFound` if this tile genuinely
+    isn't covered (WebODM's own `tile_exists()` said no) -- callers should
+    treat that as "skip," not a fatal error.
     """
-    raise NotImplementedError(
-        "Tile pixel fetching is not implemented yet. See design spec "
-        "'Raster Source Independence' and Decisions 19/20/23."
+    return webodm_client.fetch_tile(
+        visit['webodm_url'], visit['project_pk'], visit['webodm_task_id'],
+        z, x, y, visit['webodm_jwt'],
     )
 
 
-def embed_tile(pixels, sensor_metadata, capture_date, center_lat, center_lon):
+def embed_tile(pixels, capture_date, center_lat, center_lon, size, model_dir, checkpoint_path):
     """
-    Run the Clay v1.5 encoder (RGB-only) over one tile's pixels, producing an
-    embedding vector.
-
-    The real implementation should follow
-    embeddings-research/scripts/clay_embed_sized.py's conditioning logic
-    (band wavelength/mean/std normalization from Clay's own
-    configs/metadata.yaml, sin/cos time-of-year and lat/lon encoding, a
-    256x256 input tile) rather than reinventing it -- that script is the
-    validated reference for how this repo's Phase 1 research actually called
-    Clay. Not implemented here: no checkpoint is loaded, no `claymodel`
-    encoder is instantiated (see requirements.txt for why `claymodel` isn't a
-    normal pip dependency yet).
+    Run the Clay v1.5 encoder (RGB-only, per the approved Phase 1
+    recommendation) over one tile's pixels, producing an embedding vector.
+    Delegates to `embed_generate.clay.embed_tile()` -- see that module for
+    the real conditioning-input construction (band wavelength/mean/std,
+    sin/cos time-of-year, sin/cos lat/lon, GSD) mirrored from
+    `embeddings-research/scripts/clay_embed_sized.py`.
     """
-    raise NotImplementedError(
-        "Clay v1.5 inference is not implemented yet -- no checkpoint is "
-        "wired into this repo. See CLAY_CHECKPOINT_PATH/CLAY_MODEL_DIR in "
-        ".env.example and README 'Next steps' item 3."
-    )
+    return clay.embed_tile(pixels, capture_date, center_lat, center_lon, size, model_dir, checkpoint_path)
 
 
-def compute_covariates(visit, tile_observation):
+def compute_covariates(visit, z, x, y):
     """
     Decision 25: compute elevation/slope/aspect/CHM/NDVI/NDWI covariates for
     one tile_observation from DSM/DTM/multispectral bands, when they exist
     for this visit's source. Returns None (no covariates row written) when
     the required source bands are absent -- never backfilled or faked.
-    """
-    raise NotImplementedError(
-        "Covariate computation is not implemented yet -- depends on real "
-        "DSM/DTM/multispectral raster access for the visit's source, which "
-        "is not wired in yet."
-    )
 
+    Always returns None in this increment -- an honest, stated scope cut,
+    not a claim that DSM/DTM is universally absent:
+    - Real elevation/slope/aspect needs the RAW float DSM values, but
+      WebODM's tiler renders DSM/DTM tiles as colormapped 8-bit PNGs for map
+      display (`app/api/tiler.py`), not a raw-value format. Reconstructing
+      true elevation would mean also fetching `/metadata`'s rescale range
+      and treating an approximate reconstruction as real data -- not done
+      here.
+    - NDVI/NDWI need multispectral bands, which Phase 1's own research
+      found absent in every WebODM task checked (design spec "Phase 1
+      Research Findings: own task history has a real multispectral-
+      processing gap") -- these would be None for WebODM-sourced visits
+      regardless of this function's own implementation state.
 
-def write_tile_observation(tile_grid_id, visit_id, pixel_size):
+    A real implementation is future work, not this increment's scope
+    (Decision 40).
     """
-    Real, as of this increment (Decision 35): upsert one `tile_observations`
-    row in embeddingsdb via `embed_generate.db.write_tile_observation()`.
-    Requires `EMBEDDINGSDB_URL` to be set in this Actor's environment (see
-    .env.example) -- raises `db.EmbeddingsDBConfigError`/`EmbeddingsDBError`
-    otherwise. See `db.py` for the real query and its grounding in
-    `schema/embeddingsdb.sql`.
-    """
-    return db.write_tile_observation(tile_grid_id, visit_id, pixel_size)
-
-
-def write_embedding(tile_observation_id, encoder_id, vector):
-    """
-    Real, as of this increment (Decision 35): write one `embeddings` row
-    (pgvector column) via `embed_generate.db.write_embedding()`. See `db.py`
-    for how `vector` is formatted for pgvector's text input syntax.
-    """
-    return db.write_embedding(tile_observation_id, encoder_id, vector)
-
-
-def write_covariates(tile_observation_id, covariates):
-    """
-    Real, as of this increment (Decision 35): write one `covariates` row via
-    `embed_generate.db.write_covariates()`, which is a real no-op (returns
-    None, writes nothing) when `covariates` is falsy -- matching Decision 25
-    ("never backfilled or faked").
-    """
-    return db.write_covariates(tile_observation_id, covariates)
+    return None
 
 
 def run(message):
     """
-    Orchestrates the full embed-generate flow described in the module
-    docstring above, for one invocation message.
+    Orchestrates the full embed-generate flow for one invocation message,
+    for a WebODM-sourced visit (Decision 40's scope): resolve the effective
+    zoom, enumerate candidate tiles, fetch + embed each real tile, write
+    `tile_observations`/`embeddings` (and `covariates`, when
+    `compute_covariates()` returns something -- currently never, this
+    increment).
     """
-    raise NotImplementedError(
-        "embed-generate's end-to-end flow is not implemented yet -- see this "
-        "module's docstring for the intended sequence, and this repo's "
-        "README 'Next steps' for what has to exist first."
+    visit_id = message['visit_id']
+    site_id = message['site_id']
+    requested_zoom = message['zoom']
+    zoom_override = bool(message.get('zoom_override', False))
+    encoder_key = message['encoder']
+    webodm_jwt = message.get('webodm_jwt')
+
+    webodm_url = os.environ.get('WEBODM_URL')
+    if not webodm_url:
+        raise RuntimeError(
+            "WEBODM_URL is not set -- this Actor cannot fetch tiles from "
+            "WebODM without it. See .env.example."
+        )
+
+    visit_row = db.get_visit(visit_id)
+    if visit_row is None:
+        raise RuntimeError(f"No visits row found for visit_id={visit_id!r}.")
+
+    # project_pk is on both the message (Decision 41) and the visits row
+    # (Decision 41's schema addition) -- the visits row is authoritative if
+    # they ever disagree (it's what get_or_create_visit() actually persisted).
+    project_pk = visit_row['project_pk'] if visit_row['project_pk'] is not None else message.get('project_pk')
+    if project_pk is None:
+        raise RuntimeError(
+            f"visit_id={visit_id!r} has no project_pk (neither the visits "
+            f"row nor the invocation message carries one) -- cannot "
+            f"construct WebODM's project-nested tiler URL (Decision 41)."
+        )
+    if not webodm_jwt:
+        raise RuntimeError(
+            "No webodm_jwt in the invocation message -- cannot authenticate "
+            "tile fetches against WebODM (Decision 41/44)."
+        )
+
+    visit = {
+        'webodm_url': webodm_url,
+        'project_pk': project_pk,
+        'webodm_task_id': visit_row['webodm_task_id'],
+        'stac_item_id': visit_row['stac_item_id'],
+        'webodm_jwt': webodm_jwt,
+    }
+
+    zoom = resolve_site_zoom(site_id, requested_zoom, zoom_override)
+
+    name, version, size, band_config = clay.parse_encoder_key(encoder_key)
+    encoder_id = db.get_or_create_encoder(name, version, size, band_config)
+
+    checkpoint_path = os.environ.get('CLAY_CHECKPOINT_PATH')
+    model_dir = os.environ.get('CLAY_MODEL_DIR')
+    if not checkpoint_path or not model_dir:
+        raise RuntimeError(
+            "CLAY_CHECKPOINT_PATH/CLAY_MODEL_DIR must both be set -- "
+            "cannot load the Clay v1.5 encoder without them. See .env.example."
+        )
+
+    candidates = enumerate_tiles(visit, zoom)
+    logger.info(
+        "embed-generate: visit=%s site=%s zoom=%d encoder=%s -- %d candidate tiles",
+        visit_id, site_id, zoom, encoder_key, len(candidates),
     )
+
+    embedded = 0
+    skipped = 0
+    for x, y in candidates:
+        try:
+            image = fetch_tile_pixels(visit, zoom, x, y)
+        except webodm_client.TileNotFound:
+            # Real coverage gap (e.g. non-rectangular flight footprint) --
+            # WebODM's own tile_exists() said no. Expected, not an error.
+            skipped += 1
+            continue
+
+        bounds_wkt = webodm_client.tile_bounds_wkt(x, y, zoom)
+        tile_grid_id = db.get_or_create_tile_grid(site_id, zoom, x, y, bounds_wkt)
+
+        center_lat, center_lon = webodm_client.tile_center_lonlat(x, y, zoom)
+        vector = embed_tile(
+            image, visit_row['capture_date'], center_lat, center_lon,
+            size, model_dir, checkpoint_path,
+        )
+
+        pixel_size = webodm_client.meters_per_pixel(zoom, center_lat)
+        tile_observation_id = db.write_tile_observation(tile_grid_id, visit_id, pixel_size)
+        db.write_embedding(tile_observation_id, encoder_id, vector.tolist())
+
+        covariates = compute_covariates(visit, zoom, x, y)
+        db.write_covariates(tile_observation_id, covariates)
+
+        embedded += 1
+
+    logger.info(
+        "embed-generate complete: visit=%s embedded=%d skipped=%d (no coverage)",
+        visit_id, embedded, skipped,
+    )
+    return {'embedded': embedded, 'skipped': skipped}
 
 
 if __name__ == "__main__":

@@ -19,13 +19,12 @@ torch>=2.4.0
 
 # NOTE: the encoder itself -- the `claymodel` package imported as
 # `from claymodel.finetune.embedder.factory import EmbeddingEncoder` -- is
-# Clay Foundation's own repo (embeddings-research/clay-model-src, pyproject
-# name "claymodel"), not a package published to PyPI. It is deliberately NOT
-# pinned here: a real implementation needs to decide how that source tree
-# (and its own torchvision/einops/timm/etc. dependencies -- see
-# clay-model-src/pyproject.toml) gets vendored into this repo's runtime
-# (e.g. `pip install -e path/to/clay-model-src` in the Dockerfile once that
-# path is real). See README "Next steps" item 3.
+# Clay Foundation's own repo, not a package published to PyPI. As of
+# Decision 39/44 it's vendored for real at `vendor/clay-model-src` (copied
+# from embeddings-research/clay-model-src, source only -- ~350KB, no large
+# binaries) and installed via `pip install -e ./vendor/clay-model-src` in
+# the Dockerfile, which pulls in its own torch/torchvision/einops/timm/etc.
+# dependencies from its own pyproject.toml -- not duplicated here.
 
 # --- Raster tiling (embed-generate: STAC-sourced visits, Decision 19/20/23) -
 # Same library WebODM's own app/api/tiler.py already depends on -- reused

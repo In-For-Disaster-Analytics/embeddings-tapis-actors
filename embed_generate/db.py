@@ -88,6 +88,142 @@ def _execute(conn, query, params=None, fetch=None):
         return None
 
 
+def get_visit(visit_id, conn=None):
+    """
+    Read-only lookup of the `visits` row this invocation's `visit_id` points
+    at. The Actor's invocation message deliberately does NOT carry
+    `webodm_task_id` (Decision 37: "the Actor resolves it via visit_id ->
+    visits -> webodm_task_id in embeddingsdb, not from the invocation
+    payload") -- this is that resolution, plus everything else `run()` needs
+    that isn't already in the message (`project_pk` per Decision 41,
+    `capture_date` for Clay's time-of-year conditioning, `stac_item_id` to
+    decide the Decision 20/40 tiling branch).
+
+    Returns a dict or None if visit_id doesn't exist.
+    """
+    owns_conn = conn is None
+    conn = conn or _connect()
+    try:
+        row = _execute(
+            conn,
+            "SELECT webodm_task_id, project_pk, capture_date, stac_item_id "
+            "FROM visits WHERE id = %s;",
+            (visit_id,),
+            fetch='one',
+        )
+        if not row:
+            return None
+        return {
+            'webodm_task_id': str(row[0]) if row[0] else None,
+            'project_pk': row[1],
+            'capture_date': row[2],
+            'stac_item_id': row[3],
+        }
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def get_site_zoom(site_id, conn=None):
+    """
+    Decision 24/27 zoom-lock read, mirrored from
+    coreplugins/embeddings/embeddings_client.py's identical function on the
+    WebODM side (this Actor has its own connection, so it needs its own copy
+    rather than importing across repos). Returns the zoom of the site's
+    EARLIEST `tile_grid` row (its original, locked-in zoom), or None if the
+    site has no `tile_grid` rows yet.
+    """
+    owns_conn = conn is None
+    conn = conn or _connect()
+    try:
+        row = _execute(
+            conn,
+            "SELECT z FROM tile_grid WHERE site_id = %s ORDER BY created_at ASC LIMIT 1;",
+            (site_id,),
+            fetch='one',
+        )
+        return row[0] if row else None
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def get_or_create_tile_grid(site_id, z, x, y, bounds_wkt, conn=None):
+    """
+    Real upsert of one `tile_grid` row, keyed on the table's own
+    `UNIQUE (site_id, z, x, y)` constraint -- this is the stable spatial
+    cell `tile_observations.tile_grid_id` points at (design spec "Tile
+    Coverage": `tile_grid` reuses WebODM's own tiler coverage directly, one
+    row per valid (z, x, y) at the site's locked zoom).
+
+    `bounds_wkt`: a WKT Polygon string (SRID 4326) for this tile's footprint
+    -- computed by the caller from (z, x, y) via standard web-mercator tile
+    math (see `webodm_client.tile_bounds_lonlat`), not looked up here.
+
+    Returns the row's id (str, uuid).
+    """
+    owns_conn = conn is None
+    conn = conn or _connect()
+    try:
+        row = _execute(
+            conn,
+            "INSERT INTO tile_grid (site_id, z, x, y, bounds) "
+            "VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 4326)) "
+            "ON CONFLICT (site_id, z, x, y) DO UPDATE SET z = EXCLUDED.z "
+            "RETURNING id;",
+            (site_id, z, x, y, bounds_wkt),
+            fetch='one',
+        )
+        if owns_conn:
+            conn.commit()
+        return str(row[0])
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def get_or_create_encoder(name, version, size, band_config, conn=None):
+    """
+    Real upsert of one `encoders` row, keyed on the table's own
+    `UNIQUE (name, version, size, band_config)` constraint. `embeddings.
+    encoder_id` points at this -- e.g. ('clay-v1.5', '1.5', 'large', 'rgb')
+    for the `encoder: "clay-v1.5-large-rgb"` message field (see
+    `main.py:parse_encoder_key()` for how that string is split into these
+    four parts).
+
+    No default rows are seeded in schema/embeddingsdb.sql -- this table
+    starts empty, so get-or-create (not a plain lookup) is required the
+    first time any given encoder config is actually used.
+
+    Returns the row's id (str, uuid).
+    """
+    owns_conn = conn is None
+    conn = conn or _connect()
+    try:
+        existing = _execute(
+            conn,
+            "SELECT id FROM encoders WHERE name = %s AND version = %s "
+            "AND size = %s AND band_config = %s LIMIT 1;",
+            (name, version, size, band_config),
+            fetch='one',
+        )
+        if existing:
+            return str(existing[0])
+        row = _execute(
+            conn,
+            "INSERT INTO encoders (name, version, size, band_config) "
+            "VALUES (%s, %s, %s, %s) RETURNING id;",
+            (name, version, size, band_config),
+            fetch='one',
+        )
+        if owns_conn:
+            conn.commit()
+        return str(row[0])
+    finally:
+        if owns_conn:
+            conn.close()
+
+
 def write_tile_observation(tile_grid_id, visit_id, pixel_size, conn=None):
     """
     Real upsert of one `tile_observations` row, keyed on the table's own
