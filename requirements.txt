@@ -8,7 +8,16 @@
 # --- Numerics / imaging -----------------------------------------------------
 # Real imports used by the Clay embedding scripts this Actor's inference code
 # is meant to follow -- see embeddings-research/scripts/clay_embed_sized.py.
-numpy
+#
+# numpy<2 pinned deliberately, found via a real, failed ls6 Job run (Decision
+# 45 follow-up): NumPy's default PyPI wheel as of NumPy 2.x (meson-based
+# build) requires an x86-64-v2 CPU baseline (SSE4.2/POPCNT) at import time --
+# a hard requirement, not a runtime SIMD-dispatch choice. ls6's `vm-small`
+# queue's virtualized CPU doesn't expose that baseline (confirmed directly:
+# "RuntimeError: NumPy was built with baseline optimizations: (X86_V2) but
+# your machine doesn't support: (X86_V2)"). NumPy 1.x's older setup.py-based
+# build targets a more conservative baseline and does not hit this.
+numpy<2
 Pillow
 PyYAML
 

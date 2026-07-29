@@ -21,11 +21,19 @@ Explicitly NOT implemented in this increment (Decision 40's own scope cut):
 
 Real Abaco message contract (confirmed against Tapis's own Actors docs, not
 re-derived here): Abaco injects the invocation payload as the `MSG`
-environment variable -- a JSON string -- and injects context values
-(`_abaco_execution_id`, `_abaco_username`, etc.) as their own env vars.
-`read_actor_message()` below reads `os.environ['MSG']` directly and
-`json.loads()`s it -- the simplest, most portable mechanism, preferred over
-adding a dependency on tapipy's actor-side helpers (`tapipy.actors`) for this.
+environment variable, and injects context values (`_abaco_execution_id`,
+`_abaco_username`, etc.) as their own env vars. `read_actor_message()`
+below reads `os.environ['MSG']` -- the simplest, most portable mechanism,
+preferred over adding a dependency on tapipy's actor-side helpers
+(`tapipy.actors`) for this.
+
+`MSG` is base64-encoded JSON, not plain JSON (Decision 45 follow-up) --
+this Actor no longer runs under Abaco at all (see Decision 45: it runs as
+a Tapis Job on ls6 instead), and that execution path's SINGULARITY runtime
+joins every env var into one comma-separated `apptainer run --env
+k1=v1,k2=v2,...` argument, which a plain-JSON value (full of commas and
+quotes) breaks. Base64 survives that untouched. `read_actor_message()`
+decodes it before `json.loads()`.
 Structured-result note, not used here: a real Actor can also return results
 via a Unix socket contract (`/_abaco_results.sock`, tapipy's
 `send_bytes_result()`/`send_python_result()`, retrievable through Tapis's own
@@ -34,6 +42,7 @@ Abaco's results queue, so that mechanism is documented here for completeness
 but genuinely not used.
 """
 
+import base64
 import json
 import logging
 import os
@@ -93,12 +102,30 @@ def read_actor_message():
             "without it. Check how it was invoked (e.g. "
             "t.actors.sendMessage(actor_id=..., message=...))."
         )
+    # Decision 45 follow-up: MSG is base64-encoded JSON, not plain JSON.
+    # Found via a real, failed ls6 Job run: Tapis's SINGULARITY runtime
+    # joins EVERY env var (its own _tapisXxx ones plus ours) into a single
+    # comma-separated `apptainer run --env k1=v1,k2=v2,...` argument. A
+    # plain-JSON MSG value (commas between keys, quoted strings) breaks
+    # that naive join -- confirmed from the job's own tapisjob.out:
+    # "parse error ... bare \" in non-quoted-field". Abaco never had this
+    # problem (it sets MSG as a real, standalone process env var, no
+    # joining) -- this is specific to the SINGULARITY/Tapis-Job delivery
+    # path. Base64 output has no commas/quotes, so it survives untouched;
+    # apply_embed_generate() (WebODM repo) base64-encodes the same way.
+    try:
+        raw = base64.b64decode(raw).decode('utf-8')
+    except Exception as e:
+        raise ValueError(
+            f"MSG environment variable is not valid base64: {e}. "
+            f"Raw MSG value: {raw!r}"
+        ) from e
     try:
         return json.loads(raw)
     except (TypeError, ValueError) as e:
         raise ValueError(
-            f"MSG environment variable is not valid JSON: {e}. "
-            f"Raw MSG value: {raw!r}"
+            f"MSG environment variable (base64-decoded) is not valid JSON: {e}. "
+            f"Decoded MSG value: {raw!r}"
         ) from e
 
 

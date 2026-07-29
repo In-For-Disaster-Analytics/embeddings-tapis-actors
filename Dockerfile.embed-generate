@@ -36,4 +36,18 @@ ENV CLAY_CHECKPOINT_PATH=/models/clay-v1.5.ckpt
 
 COPY embed_generate ./embed_generate
 
+# Real fix, found via a live ls6 Job run (Decision 45 follow-up): Apptainer,
+# unlike Docker, does NOT honor the image's WORKDIR by default -- it
+# preserves the calling host's current directory instead. Tapis's
+# SINGULARITY runtime therefore ran this ENTRYPOINT with the SLURM job's
+# scratch dir as cwd, not /app, so `python -m embed_generate.main`'s
+# package lookup (which depends on cwd/PYTHONPATH, not WORKDIR) failed
+# with ModuleNotFoundError even though the code was right there. Setting
+# PYTHONPATH explicitly fixes it regardless of cwd, and is portable across
+# any execution backend (local Docker, GHCR, ls6/Apptainer) rather than
+# relying on an Apptainer-specific --pwd flag in the Tapis App config.
+# Placed after the expensive COPY/RUN layers above so changing it doesn't
+# invalidate their build cache.
+ENV PYTHONPATH=/app
+
 ENTRYPOINT ["python", "-m", "embed_generate.main"]
