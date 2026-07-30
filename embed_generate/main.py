@@ -43,6 +43,7 @@ but genuinely not used.
 """
 
 import base64
+import concurrent.futures
 import json
 import logging
 import os
@@ -52,6 +53,21 @@ from embed_generate import clay, db, webodm_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Decision 46: cross-tile parallelism is sized by this EXPLICIT env var, not
+# auto-detected from os.cpu_count()/os.sched_getaffinity(). Both of those
+# report the ls6 vm-small queue's own host, which is VIRTUALIZED (see
+# requirements.txt's numpy<2 pin -- that queue's virtualized CPU already
+# doesn't expose a normal x86-64 baseline) and not guaranteed to reflect
+# this job's real SLURM core allocation: SLURM sets SLURM_CPUS_PER_TASK on
+# the HOST side, but Apptainer/SINGULARITY does not forward host env vars
+# into the container unless explicitly exported (ls6/app.json's
+# envVariables doesn't do that). Guessing here risks silently
+# oversubscribing the job's real allocation (coresPerNode in ls6/app.json)
+# rather than under-using it. Defaults to 1 -- today's serial behavior --
+# so an unconfigured deployment doesn't regress; ls6/app.json wires this
+# explicitly to coresPerNode (currently 4).
+DEFAULT_MAX_WORKERS = 1
 
 
 def main():
@@ -186,17 +202,41 @@ def enumerate_tiles(visit, zoom):
     return list(webodm_client.candidate_tiles(bounds, zoom))
 
 
-def fetch_tile_pixels(visit, z, x, y):
+def _resolve_max_workers():
+    """
+    Reads EMBED_MAX_WORKERS (see this module's own comment on
+    DEFAULT_MAX_WORKERS for why this is explicit config, not
+    auto-detected). Raises on a set-but-invalid value rather than silently
+    falling back -- a misconfigured deployment should fail loudly, not
+    quietly run serial or oversubscribed.
+    """
+    raw = os.environ.get('EMBED_MAX_WORKERS')
+    if not raw:
+        return DEFAULT_MAX_WORKERS
+    try:
+        workers = int(raw)
+    except ValueError:
+        raise RuntimeError(f"EMBED_MAX_WORKERS={raw!r} is not a valid integer.")
+    if workers < 1:
+        raise RuntimeError(f"EMBED_MAX_WORKERS={workers} must be >= 1.")
+    return workers
+
+
+def fetch_tile_pixels(visit, z, x, y, session=None):
     """
     Fetch one (z, x, y) tile's real pixels from WebODM's own tiler endpoint
     (Decision 40's WebODM-sourced branch; Decision 41's jwt-authenticated
     request). Raises `webodm_client.TileNotFound` if this tile genuinely
     isn't covered (WebODM's own `tile_exists()` said no) -- callers should
     treat that as "skip," not a fatal error.
+
+    `session`: an optional shared `requests.Session` (see
+    `webodm_client.make_session()`) -- `run()`'s ThreadPoolExecutor passes
+    one shared session sized to EMBED_MAX_WORKERS.
     """
     return webodm_client.fetch_tile(
         visit['webodm_url'], visit['project_pk'], visit['webodm_task_id'],
-        z, x, y, visit['webodm_jwt'],
+        z, x, y, visit['webodm_jwt'], session=session,
     )
 
 
@@ -239,6 +279,44 @@ def compute_covariates(visit, z, x, y):
     return None
 
 
+def _process_tile(visit, zoom, x, y, encoder_id, capture_date, size, model_dir, checkpoint_path, session):
+    """
+    Full fetch -> embed -> write pipeline for one (x, y) tile -- the unit
+    of work `run()`'s ThreadPoolExecutor submits per tile (Decision 46:
+    cross-tile parallelism via threads, not processes, relying on PyTorch
+    releasing the GIL during its real CPU compute and `requests` releasing
+    it during network I/O, so worker threads get genuine concurrent use of
+    however many cores EMBED_MAX_WORKERS names -- without duplicating the
+    ~4.8GB Clay checkpoint per worker the way separate processes would).
+
+    Returns 'skipped' for a real coverage gap
+    (`webodm_client.TileNotFound` -- e.g. a non-rectangular flight
+    footprint), matching the prior sequential loop's "expected, not an
+    error" handling, or 'embedded' on success. Any OTHER exception
+    propagates out to the caller's `future.result()` -- a real error
+    should still fail the whole invocation, same as it always has.
+    """
+    try:
+        image = fetch_tile_pixels(visit, zoom, x, y, session=session)
+    except webodm_client.TileNotFound:
+        return 'skipped'
+
+    bounds_wkt = webodm_client.tile_bounds_wkt(x, y, zoom)
+    tile_grid_id = db.get_or_create_tile_grid(visit['site_id'], zoom, x, y, bounds_wkt)
+
+    center_lat, center_lon = webodm_client.tile_center_lonlat(x, y, zoom)
+    vector = embed_tile(image, capture_date, center_lat, center_lon, size, model_dir, checkpoint_path)
+
+    pixel_size = webodm_client.meters_per_pixel(zoom, center_lat)
+    tile_observation_id = db.write_tile_observation(tile_grid_id, visit['visit_id'], pixel_size)
+    db.write_embedding(tile_observation_id, encoder_id, vector.tolist())
+
+    covariates = compute_covariates(visit, zoom, x, y)
+    db.write_covariates(tile_observation_id, covariates)
+
+    return 'embedded'
+
+
 def run(message):
     """
     Orchestrates the full embed-generate flow for one invocation message,
@@ -247,6 +325,12 @@ def run(message):
     `tile_observations`/`embeddings` (and `covariates`, when
     `compute_covariates()` returns something -- currently never, this
     increment).
+
+    Decision 46: tiles are fully independent of each other (each is its
+    own fetch+embed+write), so this dispatches them through a
+    ThreadPoolExecutor (`_process_tile()`, sized by `_resolve_max_workers()`
+    / EMBED_MAX_WORKERS) rather than one at a time -- see `_process_tile()`'s
+    own docstring for why threads rather than processes.
     """
     visit_id = message['visit_id']
     site_id = message['site_id']
@@ -283,6 +367,8 @@ def run(message):
         )
 
     visit = {
+        'visit_id': visit_id,
+        'site_id': site_id,
         'webodm_url': webodm_url,
         'project_pk': project_pk,
         'webodm_task_id': visit_row['webodm_task_id'],
@@ -303,14 +389,26 @@ def run(message):
             "cannot load the Clay v1.5 encoder without them. See .env.example."
         )
 
+    max_workers = _resolve_max_workers()
+    # Cross-tile parallelism comes from the ThreadPoolExecutor below, not
+    # from PyTorch's own intra-op threading -- see disable_intraop_parallelism()'s
+    # own docstring for why leaving that at its default would oversubscribe.
+    clay.disable_intraop_parallelism()
+    # Preload synchronously, before any worker thread exists -- clay's own
+    # _encoder_cache has no lock around its get/insert, so letting several
+    # worker threads race to embed the FIRST few tiles concurrently could
+    # otherwise trigger more than one concurrent ~4.8GB checkpoint load.
+    clay.load_encoder(size, model_dir, checkpoint_path)
+
     candidates = enumerate_tiles(visit, zoom)
     logger.info(
-        "embed-generate: visit=%s site=%s zoom=%d encoder=%s -- %d candidate tiles",
-        visit_id, site_id, zoom, encoder_key, len(candidates),
+        "embed-generate: visit=%s site=%s zoom=%d encoder=%s workers=%d -- %d candidate tiles",
+        visit_id, site_id, zoom, encoder_key, max_workers, len(candidates),
     )
 
     embedded = 0
     skipped = 0
+    completed = 0
     total = len(candidates)
     start = time.monotonic()
     # Progress-only log line -- no other signal exists between the initial
@@ -319,43 +417,44 @@ def run(message):
     # hang on a real live run (~1764 tiles, 12+ minutes with zero output).
     log_every = 25
 
-    for i, (x, y) in enumerate(candidates, start=1):
-        try:
-            image = fetch_tile_pixels(visit, zoom, x, y)
-        except webodm_client.TileNotFound:
-            # Real coverage gap (e.g. non-rectangular flight footprint) --
-            # WebODM's own tile_exists() said no. Expected, not an error.
-            skipped += 1
-            continue
+    session = webodm_client.make_session(max_workers)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(
+                    _process_tile, visit, zoom, x, y, encoder_id,
+                    visit_row['capture_date'], size, model_dir, checkpoint_path, session,
+                )
+                for x, y in candidates
+            ]
+            # as_completed(), not the submission order -- completion order
+            # depends on which worker thread finishes first. future.result()
+            # is called for EVERY future (not fire-and-forget): a
+            # ThreadPoolExecutor future silently swallows its exception
+            # until .result() is read, so a real error (unlike
+            # webodm_client.TileNotFound, caught inside _process_tile
+            # itself) must still surface here and fail the whole
+            # invocation, same as the prior sequential loop did.
+            for future in concurrent.futures.as_completed(futures):
+                status = future.result()
+                if status == 'embedded':
+                    embedded += 1
+                else:
+                    skipped += 1
+                completed += 1
 
-        bounds_wkt = webodm_client.tile_bounds_wkt(x, y, zoom)
-        tile_grid_id = db.get_or_create_tile_grid(site_id, zoom, x, y, bounds_wkt)
-
-        center_lat, center_lon = webodm_client.tile_center_lonlat(x, y, zoom)
-        vector = embed_tile(
-            image, visit_row['capture_date'], center_lat, center_lon,
-            size, model_dir, checkpoint_path,
-        )
-
-        pixel_size = webodm_client.meters_per_pixel(zoom, center_lat)
-        tile_observation_id = db.write_tile_observation(tile_grid_id, visit_id, pixel_size)
-        db.write_embedding(tile_observation_id, encoder_id, vector.tolist())
-
-        covariates = compute_covariates(visit, zoom, x, y)
-        db.write_covariates(tile_observation_id, covariates)
-
-        embedded += 1
-
-        if i % log_every == 0 or i == total:
-            elapsed = time.monotonic() - start
-            rate = i / elapsed if elapsed > 0 else 0
-            remaining = (total - i) / rate if rate > 0 else float('inf')
-            logger.info(
-                "embed-generate progress: visit=%s %d/%d tiles processed "
-                "(embedded=%d skipped=%d) -- %.1fs elapsed, %.1f tiles/s, "
-                "~%.0fs remaining",
-                visit_id, i, total, embedded, skipped, elapsed, rate, remaining,
-            )
+                if completed % log_every == 0 or completed == total:
+                    elapsed = time.monotonic() - start
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    remaining = (total - completed) / rate if rate > 0 else float('inf')
+                    logger.info(
+                        "embed-generate progress: visit=%s %d/%d tiles processed "
+                        "(embedded=%d skipped=%d) -- %.1fs elapsed, %.1f tiles/s, "
+                        "~%.0fs remaining",
+                        visit_id, completed, total, embedded, skipped, elapsed, rate, remaining,
+                    )
+    finally:
+        session.close()
 
     logger.info(
         "embed-generate complete: visit=%s embedded=%d skipped=%d (no coverage)",

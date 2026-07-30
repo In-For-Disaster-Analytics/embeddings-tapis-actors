@@ -27,6 +27,7 @@ reading its `get_jwt_value()` directly.
 import math
 
 import requests
+from requests.adapters import HTTPAdapter
 from PIL import Image
 import io
 
@@ -49,7 +50,24 @@ def _tiles_url(webodm_url, project_pk, task_id, tile_type='orthophoto'):
     return f"{webodm_url.rstrip('/')}/api/projects/{project_pk}/tasks/{task_id}/{tile_type}"
 
 
-def get_tile_coverage(webodm_url, project_pk, task_id, jwt, tile_type='orthophoto'):
+def make_session(pool_size):
+    """
+    Builds a `requests.Session` whose connection pool is sized to
+    `pool_size` (embed_generate.main's EMBED_MAX_WORKERS) -- `requests`'
+    default `HTTPAdapter` pool (10 connections) would otherwise cap real
+    concurrency below whatever the ThreadPoolExecutor is actually running
+    once EMBED_MAX_WORKERS is configured above 10. A single shared Session
+    reused across worker threads (not one per thread) is `requests`' own
+    documented-safe pattern for concurrent requests.
+    """
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+
+def get_tile_coverage(webodm_url, project_pk, task_id, jwt, tile_type='orthophoto', session=None):
     """
     GET .../{tile_type}/tiles.json -- returns (minzoom, maxzoom, bounds)
     where bounds is (west, south, east, north) in EPSG:4326, exactly as
@@ -58,8 +76,13 @@ def get_tile_coverage(webodm_url, project_pk, task_id, jwt, tile_type='orthophot
     range at the requested zoom -- NOT to decide per-tile coverage (that's
     still `tile_exists()`, checked server-side per Decision 9; a tile inside
     this bbox range can still 404, e.g. a non-rectangular flight footprint).
+
+    `session`: an optional shared `requests.Session` (see `make_session()`)
+    -- falls back to a bare `requests.get()` (module-level connection pool)
+    when not given, e.g. `enumerate_tiles()`'s own single, one-off call.
     """
-    resp = requests.get(
+    client = session or requests
+    resp = client.get(
         _tiles_url(webodm_url, project_pk, task_id, tile_type) + '/tiles.json',
         params={'jwt': jwt},
         timeout=30,
@@ -77,15 +100,21 @@ def get_tile_coverage(webodm_url, project_pk, task_id, jwt, tile_type='orthophot
     return data['minzoom'], data['maxzoom'], tuple(data['bounds'])
 
 
-def fetch_tile(webodm_url, project_pk, task_id, z, x, y, jwt, tile_type='orthophoto'):
+def fetch_tile(webodm_url, project_pk, task_id, z, x, y, jwt, tile_type='orthophoto', session=None):
     """
     GET .../{tile_type}/tiles/{z}/{x}/{y}.png -- returns a PIL.Image (RGB)
     on success. Raises TileNotFound on a real 404 (rio_tiler's
     tile_exists() was False for this cell -- Decision 9's exhaustive-
     coverage check, enforced server-side, not reimplemented here) --
     callers should skip this (z, x, y), not treat it as fatal.
+
+    `session`: an optional shared `requests.Session` (see `make_session()`)
+    -- `embed_generate.main.run()`'s ThreadPoolExecutor passes one shared
+    session sized to EMBED_MAX_WORKERS so concurrent tile fetches reuse
+    pooled connections instead of each opening its own.
     """
-    resp = requests.get(
+    client = session or requests
+    resp = client.get(
         _tiles_url(webodm_url, project_pk, task_id, tile_type) + f'/tiles/{z}/{x}/{y}.png',
         params={'jwt': jwt},
         timeout=30,

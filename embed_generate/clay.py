@@ -156,10 +156,48 @@ def _normalize_latlon(lat, lon):
     return (math.sin(lat_r), math.cos(lat_r)), (math.sin(lon_r), math.cos(lon_r))
 
 
+_sensor_metadata_cache = {}
+
+
 def _load_sensor_metadata(model_dir, sensor):
+    """
+    Cached per (model_dir, sensor): `embed_generate.main.run()`'s
+    ThreadPoolExecutor calls `embed_tile()` once per tile (up to ~1764 per
+    visit), and this file/YAML read never changes within one run -- an
+    uncached re-read on every tile is pure-Python work that holds the GIL
+    for no reason, cutting into the cross-tile parallelism the thread pool
+    is there to provide.
+    """
+    cache_key = (model_dir, sensor)
+    if cache_key in _sensor_metadata_cache:
+        return _sensor_metadata_cache[cache_key]
     with open(f'{model_dir}/configs/metadata.yaml', 'r') as f:
         metadata = yaml.safe_load(f)
-    return metadata[sensor]
+    sensor_meta = metadata[sensor]
+    _sensor_metadata_cache[cache_key] = sensor_meta
+    return sensor_meta
+
+
+def disable_intraop_parallelism():
+    """
+    embed_generate.main.run() gets its cross-tile parallelism from running
+    independent tiles concurrently in a ThreadPoolExecutor (real GIL
+    release during both PyTorch's CPU compute and `requests`' network I/O),
+    not from PyTorch's own intra-op (matmul/conv) threading within a single
+    tile's forward pass. Leaving intra-op threading at its default would
+    have each worker thread ALSO spin up its own BLAS-parallel region,
+    oversubscribing the Tapis Job's real core allocation
+    (`coresPerNode` in ls6/app.json) on top of the worker pool's own
+    threads. Must be called once, before any tile is embedded --
+    `torch.set_num_threads()` is process-global, not a per-task setting.
+
+    `Dockerfile.embed-generate` also sets `OMP_NUM_THREADS=1`/
+    `MKL_NUM_THREADS=1` as a defense-in-depth backstop: some BLAS backends
+    read those env vars once at process start rather than respecting
+    `torch.set_num_threads()` for every call, so this alone isn't fully
+    sufficient on its own.
+    """
+    torch.set_num_threads(1)
 
 
 def embed_tile(image, capture_date, center_lat, center_lon, size, model_dir, checkpoint_path):

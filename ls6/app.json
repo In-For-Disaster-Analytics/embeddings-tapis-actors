@@ -69,6 +69,11 @@
           "key": "WEBODM_URL",
           "value": "https://webodm.tacc.utexas.edu",
           "description": "Production WebODM host, confirmed reachable from TACC systems the same way ClusterODM/nodeodm-ls6 already reach it (Decision 45, resolved 2026-07-24)."
+        },
+        {
+          "key": "EMBED_MAX_WORKERS",
+          "value": "4",
+          "description": "Decision 46: number of tiles embed_generate.main's run() processes concurrently via a ThreadPoolExecutor. Set explicitly to match jobAttributes.coresPerNode below, rather than auto-detected inside the container -- Apptainer/SINGULARITY on this vm-small (virtualized) queue does not reliably forward SLURM's own CPU allocation env vars, so os.cpu_count()/os.sched_getaffinity() inside the container can't be trusted to reflect the job's real core count. Keep this in sync with coresPerNode if that value ever changes."
         }
       ],
       "archiveFilter": {

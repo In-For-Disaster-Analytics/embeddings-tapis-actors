@@ -34,6 +34,17 @@ COPY vendor/clay-v1.5.ckpt /models/clay-v1.5.ckpt
 ENV CLAY_MODEL_DIR=/app/vendor/clay-model-src
 ENV CLAY_CHECKPOINT_PATH=/models/clay-v1.5.ckpt
 
+# Decision 46: embed_generate.main's run() gets cross-tile parallelism from
+# its own ThreadPoolExecutor (sized by EMBED_MAX_WORKERS), not from BLAS's
+# intra-op threading -- clay.disable_intraop_parallelism() calls
+# torch.set_num_threads(1) at runtime, but some BLAS backends read
+# OMP_NUM_THREADS/MKL_NUM_THREADS once at process start rather than
+# respecting that call for every op. Set here as a defense-in-depth
+# backstop so intra-op threading can't oversubscribe on top of the worker
+# pool's own threads regardless of backend/timing.
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+
 COPY embed_generate ./embed_generate
 
 # Real fix, found via a live ls6 Job run (Decision 45 follow-up): Apptainer,
