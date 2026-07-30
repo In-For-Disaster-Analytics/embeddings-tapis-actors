@@ -349,6 +349,58 @@ COMMENT ON TABLE labels IS
 
 
 -- ---------------------------------------------------------------------------
+-- label_studio_tasks
+-- ---------------------------------------------------------------------------
+-- Decision 49: the join WebODM itself keeps between a Label Studio
+-- (project, task) pair and the real tile_observation_id it was imported
+-- for. One row per WebODM-initiated import (TaskLabelView.post()).
+--
+-- Exists specifically to close the gap flagged in Decision 29: an
+-- ANNOTATION_CREATED/UPDATED webhook payload's OWN task.meta.
+-- tile_observation_id is caller-supplied data, not proof -- anyone holding
+-- the shared secret could otherwise forge a payload claiming any
+-- tile_observation_id, including ones belonging to a task/project they
+-- have no business labeling. The webhook handler looks up
+-- (label_studio_project_id, label_studio_task_id) here to get the
+-- tile_observation_id WebODM itself recorded at import time, and uses
+-- THAT rather than trusting the payload's own meta field.
+--
+-- A flat pair of columns on tile_observations was considered and rejected:
+-- the design spec's "Review Loop" section re-sends the SAME
+-- tile_observation_id to Label Studio a second time later (low-confidence
+-- review), which would overwrite a single flat column pair and break scope
+-- validation for any earlier, still-open Label Studio project/task
+-- referencing the same tile_observation_id. A child table with one row per
+-- import avoids that.
+--
+-- label_studio_project_id/label_studio_task_id are plain integers, matching
+-- Label Studio's own API (label_studio_client.create_project()'s own
+-- docstring: "the new project's integer id") -- not local FKs, since
+-- Label Studio is a separate service, not a table in this database (same
+-- reasoning as visits.webodm_task_id/project_pk not being real FKs into
+-- webodm_dev).
+CREATE TABLE label_studio_tasks (
+    id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    label_studio_project_id integer NOT NULL,
+    label_studio_task_id    integer NOT NULL,
+    tile_observation_id     uuid NOT NULL REFERENCES tile_observations(id) ON DELETE CASCADE,
+    created_at              timestamptz NOT NULL DEFAULT now(),
+
+    CONSTRAINT label_studio_tasks_project_task_uniq
+        UNIQUE (label_studio_project_id, label_studio_task_id)
+);
+
+COMMENT ON TABLE label_studio_tasks IS
+    'WebODM''s own ledger of which (Label Studio project, task) pair maps to '
+    'which real tile_observation_id, recorded at import time. Decision 49 -- '
+    'closes Decision 29''s webhook scope-validation gap: the webhook handler '
+    'looks up this table rather than trusting the payload''s own claimed '
+    'tile_observation_id. ON DELETE CASCADE via tile_observations, so a '
+    'deleted task/observation cannot leave a stale, still-valid mapping row '
+    'behind.';
+
+
+-- ---------------------------------------------------------------------------
 -- model_algorithms
 -- ---------------------------------------------------------------------------
 -- Decision 15: developer-extensible registry of what model-train's code
@@ -491,6 +543,7 @@ CREATE INDEX idx_labels_tile_observation_id ON labels (tile_observation_id);
 CREATE INDEX idx_model_inputs_model_id ON model_inputs (model_id);
 CREATE INDEX idx_predictions_model_id ON predictions (model_id);
 CREATE INDEX idx_predictions_tile_observation_id ON predictions (tile_observation_id);
+CREATE INDEX idx_label_studio_tasks_tile_observation_id ON label_studio_tasks (tile_observation_id);
 
 -- pgvector ANN index, deferred: an ivfflat/hnsw index needs a representative
 -- data sample to build well (ivfflat's `lists` parameter in particular is
