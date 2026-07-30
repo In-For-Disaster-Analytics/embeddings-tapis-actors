@@ -336,6 +336,14 @@ CREATE TABLE labels (
     -- to point at); continuous values are cast at the application layer.
     value                text NOT NULL,
     source               text NOT NULL CHECK (source IN ('label_studio', 'manual', 'geojson_import')),
+    -- Decision 53: the real Label Studio annotation id this row was created
+    -- from (via label_studio_client.create_annotation(), Decision 50) --
+    -- tracked directly here (not looked up via label_studio_tasks, which is
+    -- keyed by Label Studio TASK, not annotation -- one task can accumulate
+    -- several annotations over repeated repaints) so the "eraser" flow
+    -- (delete a mistaken label) knows exactly which Label Studio annotation
+    -- to delete, not just which task. NULL for source != 'label_studio'.
+    label_studio_annotation_id  integer,
     created_by           text,
     created_at           timestamptz NOT NULL DEFAULT now()
 );
@@ -346,6 +354,10 @@ COMMENT ON TABLE labels IS
     '''category'', value SHOULD reference label_classes.value, enforced at '
     'the application layer (Decision 12), not a DB FK, since continuous '
     'labels have no taxonomy row to reference.';
+COMMENT ON COLUMN labels.label_studio_annotation_id IS
+    'The real Label Studio annotation id this row mirrors (Decision 50/53) '
+    '-- lets the eraser flow delete the exact right annotation rather than '
+    'every annotation on the task. NULL for non-label_studio sources.';
 
 
 -- ---------------------------------------------------------------------------
