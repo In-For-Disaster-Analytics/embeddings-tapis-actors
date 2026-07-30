@@ -46,6 +46,7 @@ import base64
 import json
 import logging
 import os
+import time
 
 from embed_generate import clay, db, webodm_client
 
@@ -310,7 +311,15 @@ def run(message):
 
     embedded = 0
     skipped = 0
-    for x, y in candidates:
+    total = len(candidates)
+    start = time.monotonic()
+    # Progress-only log line -- no other signal exists between the initial
+    # candidate count and the final "complete" line otherwise, which made a
+    # genuinely slow (CPU-only, large-encoder) run indistinguishable from a
+    # hang on a real live run (~1764 tiles, 12+ minutes with zero output).
+    log_every = 25
+
+    for i, (x, y) in enumerate(candidates, start=1):
         try:
             image = fetch_tile_pixels(visit, zoom, x, y)
         except webodm_client.TileNotFound:
@@ -336,6 +345,17 @@ def run(message):
         db.write_covariates(tile_observation_id, covariates)
 
         embedded += 1
+
+        if i % log_every == 0 or i == total:
+            elapsed = time.monotonic() - start
+            rate = i / elapsed if elapsed > 0 else 0
+            remaining = (total - i) / rate if rate > 0 else float('inf')
+            logger.info(
+                "embed-generate progress: visit=%s %d/%d tiles processed "
+                "(embedded=%d skipped=%d) -- %.1fs elapsed, %.1f tiles/s, "
+                "~%.0fs remaining",
+                visit_id, i, total, embedded, skipped, elapsed, rate, remaining,
+            )
 
     logger.info(
         "embed-generate complete: visit=%s embedded=%d skipped=%d (no coverage)",

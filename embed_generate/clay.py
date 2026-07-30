@@ -20,14 +20,18 @@ Decision 39 -- at `CLAY_CHECKPOINT_PATH`/`CLAY_MODEL_DIR` (env vars, see
 `.env.example`).
 """
 
+import logging
 import math
 import os
 import re
+import time
 
 import numpy as np
 import torch
 import yaml
 from claymodel.finetune.embedder.factory import EmbeddingEncoder
+
+logger = logging.getLogger(__name__)
 
 # Decision 40: WebODM-sourced visits only, this increment. WebODM's own
 # orthophoto tiles are always RGB (Phase 1 research finding: "4/4 checked
@@ -97,6 +101,12 @@ def load_encoder(size, model_dir, checkpoint_path):
     if size not in SIZE_ARGS:
         raise ValueError(f"Unsupported Clay size {size!r} -- expected 'base' or 'large'.")
 
+    # Loading the ~4.8GB checkpoint is genuinely slow (seconds to a couple
+    # minutes on HPC-node disk) and happens silently on the very first tile
+    # of a run -- log it so that first-tile delay isn't mistaken for a hang.
+    logger.info("Loading Clay %s encoder from %s ...", size, checkpoint_path)
+    start = time.monotonic()
+
     encoder = EmbeddingEncoder(img_size=256, patch_size=8, **SIZE_ARGS[size])
     ckpt = torch.load(checkpoint_path, map_location='cpu')
     state_dict = ckpt['state_dict']
@@ -127,6 +137,10 @@ def load_encoder(size, model_dir, checkpoint_path):
     encoder.eval()
 
     _encoder_cache[cache_key] = encoder
+    logger.info(
+        "Clay %s encoder loaded in %.1fs (matched=%d)",
+        size, time.monotonic() - start, matched,
+    )
     return encoder
 
 
